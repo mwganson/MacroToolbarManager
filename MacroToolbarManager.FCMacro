@@ -4,7 +4,7 @@
 #
 #Goal is to make it simpler and easier to manage custom
 #macros on custom toolbars
-__version__ = "0.2023.10.11"
+__version__ = "0.2023.10.11b"
 
 LOAD_STRING = True #load UI from a string defined in this file if True,
                    #else from a separate ui file during development
@@ -21,6 +21,7 @@ import time
 import cv2, numpy as np
 
 __dir__ = FreeCAD.getUserMacroDir(True)
+__Requires__ = 'opencv-python'
 uiPath = os.path.join( __dir__,"toolbar")
 
 class CustomToolbarEditor(QtGui.QWidget):
