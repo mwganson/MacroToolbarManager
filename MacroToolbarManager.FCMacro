@@ -1,0 +1,2970 @@
+#CustomToolbarManager.FCMacro
+#2023, by <TheMarkster>, LGPL 2.1 or later
+#based on some of the code found in AddonManager
+#
+#Goal is to make it simpler and easier to manage custom
+#macros on custom toolbars
+__version__ = "0.2023.10.11"
+
+LOAD_STRING = True #load UI from a string defined in this file if True,
+                   #else from a separate ui file during development
+
+from PySide import QtGui,QtCore
+import os
+import tempfile
+import importlib.util
+import base64
+import requests
+import re
+import PIL
+import time
+import cv2, numpy as np
+
+__dir__ = FreeCAD.getUserMacroDir(True)
+uiPath = os.path.join( __dir__,"toolbar")
+
+class CustomToolbarEditor(QtGui.QWidget):
+    """Easily setup and manage custom toolbar macros"""
+    def __init__(self,  macroName="", \
+                        menuText="", \
+                        tooltip = "", \
+                        statusText = "", \
+                        whatsThis = "", \
+                        shortcut = "", \
+                        pixmap = "",\
+                        ):
+        super().__init__()
+        self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+        self.setAttribute(QtCore.Qt.WA_WindowPropagation,True)
+
+
+        if not LOAD_STRING:
+            self.form = FreeCADGui.PySideUic.loadUi(uiPath + "/custom_toolbar.ui")
+        else:
+            with tempfile.NamedTemporaryFile(suffix=".ui", delete=False) as temp_file:
+                temp_ui_file = temp_file.name
+                temp_file.write(UI_FILE.encode('utf-8'))
+                self.form = FreeCADGui.PySideUic.loadUi(temp_ui_file)
+                temp_file.close()
+                os.remove(temp_ui_file)
+
+        self.form.setWindowTitle(f"Macro Toolbar Manager v.{__version__}")
+        self.icon = self.QIconFromXPMString(__icon__)
+        self.form.setWindowIcon(self.icon)
+        self.messages = ["","","",""] #we keep only the last 3
+        self.lastPrintedMsg = "" #avoid repeating messages
+        self.macroName = macroName
+        self.menuText = menuText
+        self.tooltip = tooltip
+        self.statusText = statusText
+        self.whatsThis = whatsThis
+        self.shortcut = shortcut
+        self.pixmap = pixmap
+        self.XIcon = None
+        self.getXIcon() #initializes self.XIcon
+
+        #prevent multiple calls to line edit handlers while user is still typing
+        self.LineEditPixmapTimer = QtCore.QTimer(self)
+        self.LineEditPixmapTimer.setSingleShot(True)
+        self.LineEditPixmapTimer.timeout.connect(self.handlePixmap)
+        self.LineEditFilterTimer = QtCore.QTimer(self)
+        self.LineEditFilterTimer.setSingleShot(True)
+        self.LineEditFilterTimer.timeout.connect(self.handleFilter)
+
+        self.makeConnections()
+        self.setupWorkbenchBox()
+        self.setupUi()
+        self.updateUi()
+        self.form.show()
+        winMinSize = self.form.minimumSizeHint()
+        self.resize(winMinSize)
+
+    def QIconFromXPMString(self, xpm_string):
+        if "/*pixels*/" in xpm_string:
+            xpm = xpm_string.replace("\"","").replace(',','').splitlines()[4:-1]
+        else:
+            xpm = xpm_string.replace("\"","").replace(',','').splitlines()[3:-1]
+        for line in reversed(xpm):
+            if line.startswith("/*") and line.endswith("*/"):
+                xpm.pop(xpm.index(line))
+        pixmap = QtGui.QPixmap(xpm)
+        icon = QtGui.QIcon(pixmap)
+        return icon
+
+    def makeConnections(self):
+        self.form.statusLabel.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self.form.statusLabel.customContextMenuRequested.connect(self.showContextMenu)
+        self.form.menuButton.clicked.connect(self.showMenu)
+        self.form.selectIconFileButton.clicked.connect(self.selectIconFileButtonClicked)
+        self.form.fromMacroButton.clicked.connect(self.fromMacroButtonClicked)
+        self.form.renameToolbarButton.clicked.connect(self.renameToolbarButtonClicked)
+        self.form.deleteToolbarButton.clicked.connect(self.deleteToolbarButtonClicked)
+        self.form.newToolbarButton.clicked.connect(self.newToolbarButtonClicked)
+        self.form.closeButton.clicked.connect(self.reject)
+        self.form.removeMacroFromToolbarButton.clicked.connect(self.removeMacroFromToolbarButtonClicked)
+        self.form.addMacroToToolbarButton.clicked.connect(self.addMacroToToolbarButtonClicked)
+        self.form.ComboBoxMacroName.currentIndexChanged.connect(self.onComboBoxMacroNameCurrentIndexChanged)
+        self.form.openHyperlinkButton.clicked.connect(self.openHyperlinkButtonClicked)
+        self.form.saveExtractedButton.clicked.connect(self.saveExtractedButtonClicked)
+        self.form.useAsPixmapButton.clicked.connect(self.useAsPixmapButtonClicked)
+        self.form.ComboBoxWorkbench.currentIndexChanged.connect(self.onComboBoxWorkbenchCurrentIndexChanged)
+        self.form.activeGlobalButton.clicked.connect(self.onActiveGlobalButtonClicked)
+        self.form.ComboBoxCustomToolbar.currentIndexChanged.connect(self.onComboBoxCustomToolbarCurrentIndexChanged)
+        self.form.ComboBoxInstalled.currentIndexChanged.connect(self.onComboBoxInstalledCurrentIndexChanged)
+        self.form.selectInstalledButton.clicked.connect(self.onSelectInstalledButtonClicked)
+        self.form.activeCheckBox.clicked.connect(self.onActiveCheckBoxClicked)
+        self.form.LineEditPixmap.textChanged.connect(self.startPixmapTimer)
+        self.form.systemIconButton.clicked.connect(self.onSystemIconButtonClicked)
+        self.form.systemIconButton.installEventFilter(self)
+        self.form.LineEditFilter.textChanged.connect(self.startFilterTimer)
+        self.form.LineEditShortcut.textChanged.connect(self.onLineEditShortcutTextChanged)
+        self.form.makeIconButton.clicked.connect(self.makeSimpleIcon)
+
+
+
+    def onLineEditShortcutTextChanged(self):
+        short = self.form.LineEditShortcut.text()
+        if not short:
+            return
+        ourCmd = FreeCADGui.Command.findCustomCommand(self.macroName)
+        matches = [sh for sh in FreeCADGui.Command.listByShortcut(short) if sh != ourCmd]
+
+        if matches:
+            self.showMsg(f"There are potential conflicting shortcuts for {short}: {matches}","warning")
+        else:
+            self.showMsg(f"No conflicting shortcuts found, but note the search for conflicts only includes loaded workbenches")
+
+
+    def onSystemIconButtonClicked(self):
+        parseMod = self.getBool("ParseModFolder",False)
+        w = SystemIconSelector(parseModFolder = parseMod, cte=self)
+        w.setModal(True)
+        w.exec_()
+        self.form.LineEditPixmap.setText(w.icon_text)
+        w.deleteLater()
+
+    def startPixmapTimer(self):
+        """resets the timer to prevent it timing out and firing the handler
+           while the user is still tying in the line edit"""
+        self.LineEditPixmapTimer.start(750)
+
+    def startFilterTimer(self):
+        """resets the timer to prevent it timeout and firing the handler while the
+           the user is still typing in the line edit"""
+        self.LineEditFilterTimer.start(500)
+
+    def handleFilter(self):
+        """fired when the filter line edit changes.  We filter the files displayed in
+           the Macro name combo box"""
+        self.updateMacroNames()
+
+    def updateVariables(self):
+        """update the self.VARS from the dialog values in case the user has changed some"""
+        self.macroName = self.form.ComboBoxMacroName.currentText()
+        self.menuText = self.form.LineEditMenuText.text()
+        self.tooltip = self.form.LineEditToolTip.text()
+        self.statusText = self.form.LineEditStatusText.text()
+        self.whatsThis = self.form.LineEditWhatsThis.text()
+        self.shortcut = self.form.LineEditShortcut.text()
+        self.pixmap = self.form.LineEditPixmap.text()
+
+    def deleteMacro(self):
+        if not self.macroName:
+            self.showMsg("No macro to delete","error")
+            return
+        tm = self.tm()
+        if tm and self.macroName in tm.getInstalledMacros():
+            self.showMsg("Macro is installed in the toolbar.  Remove from toolbar first!", "error")
+            return
+
+        fullpath = os.path.join(FreeCAD.getUserMacroDir(True),self.macroName)
+        msg = QtGui.QMessageBox()
+        msg.setIcon(QtGui.QMessageBox.Warning)
+        msg.setText(f"Do you want to delete the file:\n{fullpath}?")
+        msg.setWindowTitle("Delete Macro File Confirmation")
+        msg.setStandardButtons(QtGui.QMessageBox.Yes | QtGui.QMessageBox.No)
+        msg.setDefaultButton(QtGui.QMessageBox.No)
+
+        result = msg.exec_()
+
+        if result == QtGui.QMessageBox.Yes:
+            try:
+                os.remove(fullpath)
+                self.showMsg(f"The file {fullpath} has been deleted.")
+                self.updateMacroNames()
+            except Exception as e:
+                QtGui.QMessageBox.critical(self, "Error", f"An error occurred while deleting the file:\n{str(e)}")
+        else:
+            self.showMsg("User canceled.  The file has not been deleted.")
+
+
+    def setBool(self, name, value):
+        pg = FreeCAD.ParamGet("User parameter:Plugins/MacroToolbarManager")
+        pg.SetBool(name, value)
+        self.showMsg(f"Setting {name} to {value}")
+
+    def getBool(self, name, default):
+        pg = FreeCAD.ParamGet("User parameter:Plugins/MacroToolbarManager")
+        return pg.GetBool(name, default)
+
+    def eventFilter(self, obj, event):
+        if event.type() == event.ContextMenu and obj == self.form.systemIconButton:
+            # Show the context menu at the cursor position
+            systemIconsMenu = self.makeSystemIconsMenu()
+            systemIconsMenu.exec_(event.globalPos())
+            return True
+        return super().eventFilter(obj, event)
+
+
+    def makeSimpleIcon(self):
+        """make a simple single character icon"""
+        class ColorDlg (QtGui.QColorDialog):
+            def __init__(self,title,flags):
+                QtGui.QColorDialog.__init__(self)
+                self.title = title
+                self.flags = flags
+
+            def getClr(self, currentColor):
+                current = QtGui.QColor(currentColor[0]*255,currentColor[1]*255,currentColor[2]*255,currentColor[3]*255)
+                self.setCustomColor(0,QtGui.QColor.fromRgb(204,204,204,0)) # gray, default face color
+                self.setCustomColor(2,QtGui.QColor.fromRgb(0,0,0,0)) #black, default line and point color
+                clr = self.getColor(current,None,self.title, self.flags)
+                return clr
+
+        class SimpleIconMaker(QtGui.QDialog):
+            def __init__(self, cte):
+                super(SimpleIconMaker, self).__init__()
+                self.setWindowTitle("Simple 64x64 Icon Maker")
+                self.cte = cte #cte = Custom Toolbar Editor instance
+                self.layout = QtGui.QGridLayout()
+                self.setLayout(self.layout)
+                self.textLabel = QtGui.QLabel("Text:")
+                self.layout.addWidget(self.textLabel, 0, 0)
+                self.textEdit = QtGui.QLineEdit()
+                self.textEdit.setText("A")
+                self.textEdit.textChanged.connect(self.updateImage)
+                self.textEdit.setToolTip("\\n supported (2 lines max)")
+                self.layout.addWidget(self.textEdit, 0, 1)
+
+                self.fontLabel = QtGui.QLabel("Font:")
+                self.layout.addWidget(self.fontLabel,0,2)
+
+                self.fontBox = QtGui.QComboBox()
+                self.fonts = {
+                         "HERSHEY_COMPLEX":cv2.FONT_HERSHEY_COMPLEX,\
+                         "HERSHEY_COMPLEX_SMALL":cv2.FONT_HERSHEY_COMPLEX_SMALL,\
+                         "HERSHEY_DUPLEX":cv2.FONT_HERSHEY_DUPLEX,\
+                         "HERSHEY_SCRIPT_COMPLEX":cv2.FONT_HERSHEY_SCRIPT_COMPLEX,\
+                         "HERSHEY_SCRIPT_SIMPLEX":cv2.FONT_HERSHEY_SCRIPT_SIMPLEX,\
+                         "HERSHEY_SIMPLEX":cv2.FONT_HERSHEY_SIMPLEX,\
+                         "HERSHEY_TRIPLEX":cv2.FONT_HERSHEY_TRIPLEX,\
+                         "ITALIC":cv2.FONT_ITALIC}
+                self.fontBox.currentIndexChanged.connect(self.updateImage)
+                self.fontBox.addItems(self.fonts.keys())
+                self.layout.addWidget(self.fontBox, 0, 3)
+
+                self.colorLabel = QtGui.QLabel("Text color:")
+                self.layout.addWidget(self.colorLabel, 1, 0)
+                self.colorButton = QtGui.QPushButton()
+                self.colorButton.setStyleSheet("background-color:red;")
+                self.colorButton.clicked.connect(self.onColorButtonClicked)
+                self.layout.addWidget(self.colorButton, 1, 1)
+
+                self.scaleLabel = QtGui.QLabel("Scale:")
+                self.layout.addWidget(self.scaleLabel, 2, 0)
+                self.scaleSpinBox = QtGui.QDoubleSpinBox()
+                self.scaleSpinBox.valueChanged.connect(self.updateImage)
+                self.scaleSpinBox.setToolTip("Initial scale is small to ensure text fits in image")
+                self.scaleSpinBox.setRange(0.01,100)
+                self.scaleSpinBox.setSingleStep(0.1)
+                self.scaleSpinBox.setValue(.5)
+                self.layout.addWidget(self.scaleSpinBox, 2, 1)
+
+                self.thicknessLabel = QtGui.QLabel("Line thickness:")
+                self.layout.addWidget(self.thicknessLabel, 3, 0)
+                self.thicknessSpinBox = QtGui.QSpinBox()
+                self.thicknessSpinBox.valueChanged.connect(self.updateImage)
+                self.thicknessSpinBox.setRange(1,100)
+                self.thicknessSpinBox.setSingleStep(1)
+                self.thicknessSpinBox.setValue(2)
+                self.layout.addWidget(self.thicknessSpinBox, 3, 1)
+
+                #for dragging in the image label
+                self.dragging = False
+                self.start_pos = None
+
+                self.xAdjustLabel = QtGui.QLabel("X adjust:")
+                self.layout.addWidget(self.xAdjustLabel, 4, 0)
+                self.xAdjustSpinBox = QtGui.QSpinBox()
+                self.xAdjustSpinBox.valueChanged.connect(self.updateImage)
+                self.xAdjustSpinBox.setRange(-100,100)
+                self.xAdjustSpinBox.setSingleStep(1)
+                self.xAdjustSpinBox.setValue(0)
+                self.layout.addWidget(self.xAdjustSpinBox, 4, 1)
+
+                self.yAdjustLabel = QtGui.QLabel("Y adjust:")
+                self.layout.addWidget(self.yAdjustLabel, 5, 0)
+                self.yAdjustSpinBox = QtGui.QSpinBox()
+                self.yAdjustSpinBox.valueChanged.connect(self.updateImage)
+                self.yAdjustSpinBox.setRange(-100,100)
+                self.yAdjustSpinBox.setSingleStep(1)
+                self.yAdjustSpinBox.setValue(0)
+                self.layout.addWidget(self.yAdjustSpinBox, 5, 1)
+
+                self.basePixmap = None
+                self.baseIconButton = QtGui.QPushButton("Base icon")
+                self.baseIconButton.clicked.connect(self.baseIconButtonClicked)
+                self.layout.addWidget(self.baseIconButton, 6,3, 1, 1)
+
+                self.saveButton = QtGui.QPushButton("Extract XPM")
+                self.saveButton.clicked.connect(self.saveImage)
+                self.saveButton.setToolTip("Saves to XPM, sets up as Pixmap, closes dialog")
+                self.layout.addWidget(self.saveButton,6,4,1, 1)
+
+
+                self.iconLabel = QtGui.QLabel()
+                self.iconLabel.installEventFilter(self)
+                self.iconLabel.setObjectName("iconLabel")
+                self.pixmap = None
+                self.updateImage()
+
+                self.layout.addWidget(self.iconLabel, 1, 3, 5, 3)
+
+                self.whiteToTransparentCheckBox = QtGui.QCheckBox()
+                self.whiteToTransparentCheckBox.setText("White -> Transparent")
+                self.whiteToTransparentCheckBox.setToolTip("Applies only to XPM extraction")
+                self.blackToTransparentCheckBox = QtGui.QCheckBox()
+                self.blackToTransparentCheckBox.setText("Black -> Transparent")
+                self.blackToTransparentCheckBox.setToolTip("Applies only to XPM extraction")
+                self.whiteToTransparentCheckBox.setChecked(True)
+                self.blackToTransparentCheckBox.setChecked(True)
+                self.layout.addWidget(self.whiteToTransparentCheckBox, 6, 0)
+                self.layout.addWidget(self.blackToTransparentCheckBox, 6, 1)
+
+
+            def updateImage(self):
+                if not bool(hasattr(self, "textEdit") and hasattr(self,"scaleSpinBox") and \
+                            hasattr(self, "thicknessSpinBox") and hasattr(self, "iconLabel") and \
+                            hasattr(self, "fontBox") and \
+                            hasattr(self, "xAdjustSpinBox") and hasattr(self, "yAdjustSpinBox")):
+                    return
+                self.pixmap = self.makeImage(self.textEdit.text() ,self.scaleSpinBox.value(), self.thicknessSpinBox.value(), self.getColor(), (255,255,255))
+                scaledPixmap = self.pixmap.scaled(200, 200, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+                self.iconLabel.setPixmap(scaledPixmap)
+
+            def getColor(self):
+                palette = self.colorButton.palette()
+                color = palette.color(palette.Background)
+                #print(f"color = {color.red(), color.green(), color.blue()}")
+                return (color.red(), color.green(), color.blue(), 0) #0 not used, but 4 values are expected
+
+            def baseIconButtonClicked(self):
+                iconFolders = self.cte.getIconFolders()
+                if iconFolders:
+                    default_folder = iconFolders[0]
+                else:
+                    default_folder = FreeCAD.getUserMacroDir(True)
+                dlg = QtGui.QFileDialog(self, "Open image file, or cancel to clear out base icon", default_folder, \
+                                  "Image Files (*.png *.jpg *.jpeg *.bmp *.gif *.svg *.webp *.xpm *.XPM);;All Files (*)")
+                dlg.setFileMode(QtGui.QFileDialog.ExistingFile)
+                if dlg.exec_():
+                    filename = dlg.selectedFiles()[0]
+                    self.basePixmap = QtGui.QPixmap(filename)
+                    self.updateImage()
+                else:
+                    self.basePixmap = None
+                    self.updateImage()
+                    return
+
+            def onColorButtonClicked(self):
+                colorDlg = ColorDlg("Simple Icon Maker", QtGui.QColorDialog.DontUseNativeDialog)
+                color = colorDlg.getClr(self.getColor())
+                colorString = f'rgb({color.red()}, {color.green()}, {color.blue()})'
+                self.colorButton.setStyleSheet(f'background-color: {colorString};')
+                self.updateImage()
+
+            def saveImage(self):
+
+                image = self.pixmap.toImage()
+                #image.save("c:/users/mwganson/Downloads/pathtosave.xpm", "XPM")
+                buffer = QtCore.QBuffer()
+                buffer.open(QtCore.QBuffer.ReadWrite)
+                image.save(buffer, "XPM")
+
+                # Get the XPM data as bytes
+                xpm_data_bytes = buffer.data()
+
+                # Convert the bytes to a string
+                xpm_data_string = xpm_data_bytes.data().decode('utf-8')
+                if self.whiteToTransparentCheckBox.isChecked():
+                    xpm_data_string = xpm_data_string.replace("#ffffff","None").replace("#FFFFFF","None")
+                if self.blackToTransparentCheckBox.isChecked():
+                    xpm_data_string = xpm_data_string.replace("#000000","None")
+                self.cte.form.PlainTextEditExtracted.setPlainText(xpm_data_string)
+                self.cte.form.saveExtractedButton.setEnabled(True)
+                self.close()
+                #FreeCAD.Console.PrintMessage(f"xpm = {xpm_data_string}\n")
+
+            def eventFilter(self, obj, event):
+                if obj == self.iconLabel and event.type() == event.Wheel:
+                    # Adjust the scale factor based on the mouse wheel
+                    angle = event.angleDelta().y()
+                    scale_factor = 1.1 if angle > 0 else 1 / 1.1
+                    scale = self.scaleSpinBox.value()
+                    scale *= scale_factor
+                    self.scaleSpinBox.setValue(scale)
+                    return True
+                if obj == self.iconLabel:
+                    if event.type() == event.MouseButtonPress:
+                        if event.button() == QtCore.Qt.LeftButton:
+                            self.dragging = True
+                            self.start_pos = event.pos()
+                            self.iconLabel.setCursor(QtGui.QCursor(QtCore.Qt.ClosedHandCursor))
+                            return True  # Consume the event
+                    elif event.type() == event.MouseMove:
+                        if self.dragging and self.start_pos is not None:
+                            delta = event.pos() - self.start_pos
+                            self.xAdjustSpinBox.setValue(self.xAdjustSpinBox.value() + delta.x())
+                            self.yAdjustSpinBox.setValue(self.yAdjustSpinBox.value() + delta.y())
+                            self.start_pos = event.pos()
+                            return True  # Consume the event
+                    elif event.type() == event.MouseButtonRelease:
+                        if event.button() == QtCore.Qt.LeftButton:
+                            self.dragging = False
+                            self.start_pos = None
+                            self.iconLabel.setCursor(QtGui.QCursor(QtCore.Qt.ArrowCursor))
+                            return True  # Consume the event
+                return False
+
+
+            def makeImage(self, text, scale, thickness, color, bgColor):
+                """text is text to be used, scale is a float, thickness is an integer for
+                   how thick in pixels the font will be, color is foreground color,
+                   bgColor is background color.  Both colors are tuples in the form
+                   of (0-255, 0-255, 0-255) RGB.  Returns a QPixmap or None"""
+
+
+                if self.basePixmap:
+                    imageBase = self.basePixmap.toImage()
+
+                    # Convert the QImage to a numpy array
+                    width, height = imageBase.width(), imageBase.height()
+                    format = imageBase.format()
+
+                    if format == 3:  # RGB format (3 bytes per pixel)
+                        image_array = np.frombuffer(imageBase.constBits(), dtype=np.uint8).reshape((height, width, 3))
+                    elif format == 4 or format == QtGui.QImage.Format.Format_ARGB32_Premultiplied:  # RGBA format (4 bytes per pixel)
+                        image_array = np.frombuffer(imageBase.constBits(), dtype=np.uint8).reshape((height, width, 4))
+                    else:
+                        self.cte.showMsg(f"Unsupported bits per pixel in base icon: {format}, ignoring base icon","error")
+                        image_array = None
+                        image = np.zeros((64, 64, 3), dtype=np.uint8)
+                        image[:, :] = bgColor  # Set the entire image to background color
+
+                    if image_array is not None:
+                        if format == 4 or format == QtGui.QImage.Format.Format_ARGB32_Premultiplied:  # ARGB or ARGB_Premultiplied to BGR
+                            image = cv2.cvtColor(image_array, cv2.COLOR_RGBA2BGR)
+                        elif format == 3:  # RGB to BGR
+                            image = cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
+                        image = cv2.resize(image, (64, 64))
+
+                else: #no base icon
+                    image = np.zeros((64, 64, 3), dtype=np.uint8)
+                    image[:, :] = bgColor  # Set the entire image to background color
+
+                font = self.fonts[self.fontBox.currentText()]
+                font_scale = scale
+                font_color = color
+                font_thickness = thickness
+
+                # Get the size of the text
+                text_size = cv2.getTextSize(text, font, font_scale, font_thickness)[0]
+
+                # Calculate the position to center the text
+                x = (image.shape[1] - text_size[0]) // 2 + self.xAdjustSpinBox.value()
+                y = (image.shape[0] + text_size[1]) // 2 + self.yAdjustSpinBox.value()
+
+                if not "\\n" in text:
+                    cv2.putText(image, text, (x, y), font, font_scale, font_color, font_thickness)
+                else:
+                    idx = text.find("\\n")
+                    text1 = text[:idx]
+                    text2 = text[idx+2:]
+                    print(f"text1,text2: {text1},{text2}")
+                    cv2.putText(image, text1, (x, y), font, font_scale, font_color, font_thickness)
+                    cv2.putText(image, text2, (x, y + int(text_size[1] *1.25)), font, font_scale, font_color, font_thickness)
+                    if text.count("\\n") > 1:
+                        self.cte.showMsg("Only 2 lines of text supported at this time, 3rd and later lines ignored.", "warning")
+
+                if image is not None:
+
+                    h, w, ch = image.shape
+                    bytes_per_line = ch * w
+                    q_image = QtGui.QImage(image.data, w, h, bytes_per_line, QtGui.QImage.Format_RGB888)
+                    pixmap = QtGui.QPixmap.fromImage(q_image)
+                    return pixmap
+                else:
+                    return None
+
+            def iconize(self,button,icon_theme_name="",system_name=""):
+                """iconize widget, which could be button or checkbox from QStyle theme or system"""
+                if not system_name:
+                    pixmapi = getattr(QtGui.QStyle, icon_theme_name)
+                    button.setIcon(self.style().standardIcon(pixmapi))
+                else:
+                    icon = FreeCADGui.getIcon(system_name)
+                    button.setIcon(icon)
+
+        dlg = SimpleIconMaker(self)
+        dlg.exec_()
+        dlg.deleteLater()
+
+    def removeMacroAction(self):
+        """removes the current macro's action from the system.  Does not delete macro file"""
+        tm = self.tm()
+        if not tm:
+            self.showMsg(f"Unable to aquire ToolbarManager object for {self.tbName}:{self.wbName}", "error")
+            return
+        commandName = tm.getCommandName(self.macroName)
+        if tm.removeMacroAction(self.macroName):
+            self.showMsg(f"Successfully removed {self.macroName} ({commandName}) action")
+        else:
+            self.showMsg(f"Failed to remove {self.macroName} ({commandName}) action","error")
+
+
+
+    def makeSystemIconsMenu(self):
+        """make the sytem icons menu, will be used for both the context menu and the main menu"""
+        systemIconsMenu = QtGui.QMenu("System icons")
+
+        parseModFolderAction = QtGui.QAction("Parse Mod folders", systemIconsMenu, checkable=True)
+        parseModFolder = self.getBool("ParseModFolder",False)
+        parseModFolderAction.setChecked(parseModFolder)
+        toggler = self.makeToggler("ParseModFolder", not parseModFolderAction.isChecked())
+        parseModFolderAction.toggled.connect(toggler)
+        systemIconsMenu.addAction(parseModFolderAction)
+
+        manageIconFoldersAction = QtGui.QAction("Manage icon folders", systemIconsMenu)
+        manageIconFoldersAction.triggered.connect(self.manageIconFolders)
+        systemIconsMenu.addAction(manageIconFoldersAction)
+
+        return systemIconsMenu
+
+    def makeToggler(self,name,value): return lambda: self.setBool(name,value)
+
+    def showMenu(self):
+
+        menu = QtGui.QMenu("Main menu")
+
+# ########## begin settings menu
+
+
+        settingsMenu = QtGui.QMenu("Settings")
+        self.iconize(settingsMenu, system_name="preferences-system")
+        menu.addMenu(settingsMenu)
+
+
+# # system icons start
+
+        systemIconsMenu = self.makeSystemIconsMenu()
+        settingsMenu.addMenu(systemIconsMenu)
+
+
+
+# # system icons end
+
+# ##########  end settings menu
+
+        loadWorkbenchesAction = QtGui.QAction("Load workbenches", self)
+        loadWorkbenchesAction.triggered.connect(self.loadWorkbenches)
+        self.iconize(loadWorkbenchesAction, system_name="AddonManager")
+        loadWorkbenchesAction.setToolTip("By loading all workbenches you can ensure "+\
+               "any shortcuts you have set will not conflict with any shortcuts in any workbench")
+        menu.addAction(loadWorkbenchesAction)
+
+
+        removeOrphansAction = QtGui.QAction("Remove orphans", menu)
+        tm = self.tm()
+        if not tm:
+            removeOrphansAction.setEnabled(False)
+        else:
+            removeOrphansAction.setEnabled(tm.getOrphans() != [])
+            removeOrphansAction.triggered.connect(self.removeOrphans)
+        menu.addAction(removeOrphansAction)
+
+        deleteMacroAction = QtGui.QAction("Delete macro", menu)
+        if not self.macroName:
+            deleteMacroAction.setEnabled(False)
+        deleteMacroAction.triggered.connect(self.deleteMacro)
+        menu.addAction(deleteMacroAction)
+
+        removeMacroActionAction = QtGui.QAction("Remove macro action", menu)
+        tm = self.tm()
+        #must not be installed and must have action
+        if tm and not tm.isInstalled(self.macroName) and tm.getCommandName(self.macroName):
+            removeMacroActionAction.setEnabled(True)
+        else:
+            removeMacroActionAction.setEnabled(False)
+        removeMacroActionAction.triggered.connect(self.removeMacroAction)
+        menu.addAction(removeMacroActionAction)
+
+
+
+        menu.exec_(self.form.menuButton.mapToGlobal(QtCore.QPoint()))
+
+    def manageIconFolders(self):
+        """Manage the folders we use to find additional icons in when using the System icons button"""
+
+        class IconFolderManager(QtGui.QDialog):
+            def __init__(self):
+                super(IconFolderManager, self).__init__()
+                self.setWindowTitle("Icon Folder Manager")
+
+                self.layout = QtGui.QGridLayout()
+                self.setLayout(self.layout)
+                self.customPathNames = [] #e.g. CustomPath0, CustomPath1, etc.
+                self.iconFolders = []
+                self.lineEdits = []
+                self.minusButtons = []
+                self.plusButton = None
+                self.bitmapsGroup = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Bitmaps")
+                self.setupUi()
+
+            def iconize(self,button,icon_theme_name="",system_name=""):
+                """iconize widget, which could be button or checkbox from QStyle theme or system"""
+                if not system_name:
+                    pixmapi = getattr(QtGui.QStyle, icon_theme_name)
+                    button.setIcon(self.style().standardIcon(pixmapi))
+                else:
+                    icon = FreeCADGui.getIcon(system_name)
+                    button.setIcon(icon)
+
+            def makeWidgets(self):
+                """make the line edit and button widgets"""
+                def makeTrigger(cpn): return lambda : self.onMinusButtonClicked(cpn)
+
+                self.plusButton = QtGui.QPushButton()
+                self.plusButton.setMaximumWidth(20)
+                self.iconize(self.plusButton,system_name="list-add")
+                self.plusButton.clicked.connect(self.onPlusButtonClicked)
+                for row, folder in enumerate(self.iconFolders):
+                    lineEdit = QtGui.QLineEdit()
+                    lineEdit.setReadOnly(True)
+                    self.lineEdits.append(lineEdit)
+                    minusButton = QtGui.QPushButton()
+                    self.iconize(minusButton,system_name="list-remove")
+                    minusButton.clicked.connect(makeTrigger(self.customPathNames[row]))
+                    self.minusButtons.append(minusButton)
+                    self.layout.addWidget(lineEdit, row, 0, 1, 5)
+                    self.layout.addWidget(minusButton, row, 5)
+                    lineEdit.setText(folder)
+                    lineEdit.setMinimumWidth(400)
+                    minusButton.setContentsMargins(10,0,10,0)
+                    lineEdit.setContentsMargins(10,0,10,0)
+                    minusButton.setMaximumWidth(20)
+                self.layout.addWidget(self.plusButton, len(self.iconFolders), 5)
+
+            def clearLayout(self):
+                """clear the layout in preparation for rebuilding it"""
+                excluded = ["qwidget","scrollArea"]
+                while self.layout.count():
+                    item = self.layout.takeAt(0)
+                    widget = item.widget()
+                    if widget and widget.objectName() not in excluded:
+                        widget.deleteLater()
+                self.lineEdits = []
+                self.minusButtons = []
+                self.plusButton = None
+
+            def setupUi(self):
+                """setup the ui, only called once from __init__()"""
+                self.getIconFolders()
+                self.makeWidgets()
+                self.adjustContentMinimumWidth()
+
+            def onMinusButtonClicked(self, customPathName):
+                """remove this custom path from parameters"""
+                self.removeCustomPathName(customPathName)
+                self.clearLayout()
+                self.getIconFolders()
+                self.makeWidgets()
+
+            def onPlusButtonClicked(self):
+                """add a new custom path folder to parameters"""
+                newFolder = self.selectFolder()
+                if not newFolder:
+                    return
+                self.addCustomPathName(newFolder)
+                self.clearLayout()
+                self.getIconFolders()
+                self.makeWidgets()
+
+            def selectFolder(self):
+                folderPath = QtGui.QFileDialog.getExistingDirectory(self, "Select an icon folder")
+                if folderPath:
+                    return folderPath
+                else:
+                    return None
+
+            def adjustContentMinimumWidth(self):
+                """Adjust the minimum width of the content widget to accommodate line edits"""
+                if not self.lineEdits:
+                    return
+                maxLineEditWidth = max(lineEdit.sizeHint().width() for lineEdit in self.lineEdits)
+                content_widget = self.layout.parentWidget()  # Get the content widget
+                content_widget.setMinimumWidth(maxLineEditWidth + 100)  # Adjust as needed
+                self.layout.setColumnMinimumWidth(0, maxLineEditWidth + 10)
+
+            def getIconFolders(self):
+                """Gets the current icon folders in parameters"""
+                self.customPathNames = self.bitmapsGroup.GetStrings()
+                self.iconFolders = [self.bitmapsGroup.GetString(cpn) for cpn in self.customPathNames]
+                #print(f"self.iconFolders = {self.iconFolders}")
+
+            def removeCustomPathName(self, cpn):
+                """remove the custom path name from parameters"""
+                self.bitmapsGroup.RemString(cpn)
+                #print(f"removed string {cpn}")
+
+            def addCustomPathName(self, folder):
+                """make a new custom path name and set folder as the value"""
+                existing = self.bitmapsGroup.GetStrings()
+                basename = "CustomPath"
+                ii = 0
+                while f"{basename}{ii}" in existing:
+                    ii += 1
+                    if ii>= 1000:
+                        raise Exception("too many Custom Paths")
+                newname = f"{basename}{ii}"
+                self.bitmapsGroup.SetString(newname,folder)
+
+        dlg = IconFolderManager()
+        dlg.exec_()
+        dlg.deleteLater()
+
+
+    def loadWorkbenches(self):
+        self.showMsg("loading workbenches, might take a minute")
+
+        workbenches = [self.form.ComboBoxWorkbench.itemText(i) for i in range(1,self.form.ComboBoxWorkbench.count())]
+        curBench = FreeCADGui.activeWorkbench().name()
+        for wkbench in workbenches:
+            FreeCADGui.activateWorkbench(wkbench)
+            self.showMsg(f"Activating {wkbench}...")
+            FreeCADGui.updateGui()
+        FreeCADGui.activateWorkbench(curBench)
+        self.showMsg("Done activating workbenches.")
+
+    def showContextMenu(self, event):
+        menu = QtGui.QMenu(self)
+        clearAction = QtGui.QAction("Clear messages", self)
+        clearAction.triggered.connect(lambda:self.form.statusLabel.setText(""))
+        menu.addAction(clearAction)
+        menu.exec_(self.form.statusLabel.mapToGlobal(event))
+
+    #the following are convenience properties for accessing widgets' text
+
+    @property
+    def macroName(self):
+        return self.form.ComboBoxMacroName.currentText()
+
+    @macroName.setter
+    def macroName(self,txt):
+        self.form.ComboBoxMacroName.setCurrentText(txt)
+
+    @property
+    def wbName(self):
+        return self.form.ComboBoxWorkbench.currentText()
+
+    @wbName.setter
+    def wbName(self,txt):
+        self.form.ComboBoxWorkbench.setCurrentText(txt)
+
+    @property
+    def tbName(self):
+        return self.form.ComboBoxCustomToolbar.currentText()
+
+    @tbName.setter
+    def tbName(self,txt):
+        self.form.ComboBoxCustomToolbar.setCurrentText(txt)
+
+    def getXIcon(self):
+        b64_icon_string = "iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAIAAABvFaqvAAAACXBIWXMAABJ0AAASdAHeZh94AAAAmklEQVQ4jbWVQQ7AIAgEgf//2R6a0EqXhRjqycoyQoGoay2ZWDZC2UCqqqp9z6A3Pw2bkhI2ILWSBQX4HxFWMHmtLHxzFrngiahkfSlvF8sMwZlTRESbSXFKjCgTdQS4aoSVmdIRgQ7kghR0Xv6mQ2b6bURgv3RaxLjZEXXf3woYbSeQbWibFI4ea0iQWvM5uF1cDIb2bI29Ihe+pFo7/ev0twAAAABJRU5ErkJggg=="
+
+        binary_data = base64.b64decode(b64_icon_string)
+        byte_array = QtCore.QByteArray(binary_data)
+        pixmap = QtGui.QPixmap()
+        pixmap.loadFromData(byte_array)
+        self.XIcon = QtGui.QIcon(pixmap)
+
+    def isInvalidIcon(self,pixmap2):
+        """compare the pixmap to a known invalid (X) icon"""
+        #this is the base64 text representation of the (X) icon
+        #you get when FreeCAD cannot find an icon file
+        #We do it this way of generating an invalid icon in order
+        #to avoid warning messages
+
+        pixmap1 = self.XIcon.pixmap(64,64)
+
+        #if brute force isn't working it just means you're not using enough force
+        for x in range(pixmap1.width()):
+            for y in range(pixmap1.height()):
+                pixel1 = pixmap1.toImage().pixel(x, y)
+                pixel2 = pixmap2.toImage().pixel(x, y)
+                if pixel1 != pixel2:
+                    return False
+        return True
+
+    def handlePixmap(self):
+        """handles changes to the Pixmap field in the dialog"""
+        pixmap = self.form.LineEditPixmap.text()
+        icon = QtGui.QIcon(pixmap)
+        icon2 = QtGui.QIcon(FreeCADGui.getIcon(pixmap))
+        if not icon.isNull() and not icon.pixmap(64,64).isNull():
+            #self.showMsg(f"valid icon from: {pixmap}")
+            self.form.iconLabel.setPixmap(icon.pixmap(64,64))
+        elif not icon2.isNull() and not icon2.pixmap(64,64).isNull():
+            self.form.iconLabel.setPixmap(icon2.pixmap(64,64))
+            if self.isInvalidIcon(icon2.pixmap(64,64)):
+                self.showMsg(f"icon from '{pixmap}' is invalid","warning")
+            else:
+                pass
+                #self.showMsg(f"valid icon from theme: '{pixmap}'")
+        else:
+            self.form.LineEditPixmap.setPlaceholderText("(no icon)")
+            #self.form.iconLabel.setPixmap(self.icon.pixmap(64,64))
+            self.form.iconLabel.setPixmap(self.XIcon.pixmap(64,64))
+            if pixmap:
+                self.showMsg(f"Unable to make valid icon from {pixmap}","warning")
+
+    def onActiveGlobalButtonClicked(self):
+        """toggles workbench combo box between Global workbench and currently active workbench"""
+        cb = self.form.ComboBoxWorkbench
+        cbCurrent = cb.currentText()
+        activeWB = FreeCADGui.activeWorkbench().name()
+        if cbCurrent != activeWB and cbCurrent != "Global":
+            cb.setCurrentText("Global")
+            self.updateUi()
+            self.showMsg(f"Switched to {activeWB}, click again to switch to Global","normal")
+            return
+        elif cbCurrent == "Global":
+            cb.setCurrentText(activeWB)
+            self.updateUi()
+            self.showMsg(f"Switched to {activeWB}, click again to switch to Global","normal")
+            return
+        elif cbCurrent == activeWB:
+            cb.setCurrentText("Global")
+            self.updateUi()
+            self.showMsg(f"Switched to Global workbench, click again to switch to {activeWB}","normal")
+            return
+
+    def setupWorkbenchBox(self):
+        """adds 'Global' and all installed workbenches to workbench combo box"""
+        wbs = FreeCADGui.listWorkbenches()
+        wbNames = sorted([k for k,v in wbs.items() if not k=="NoneWorkbench"])
+        wbNames[0] = "Global"
+        self.form.ComboBoxWorkbench.addItems(wbNames)
+        self.form.ComboBoxWorkbench.setCurrentText("Global")
+
+    def onComboBoxWorkbenchCurrentIndexChanged(self):
+        """main thing to do here is to update the toolbar combo box, the rest will update
+           based on this update"""
+        if self.wbName:
+            txt = "Toolbar will appear in all workbenches" if self.wbName == "Global"\
+                   else f"Toolbar will only appear in {self.wbName}"
+            self.form.ComboBoxWorkbench.setToolTip(txt)
+        self.updateCustomToolbarComboBox()
+
+    def onComboBoxInstalledCurrentIndexChanged(self):
+        """The user has changed the current text of the installed macros combo box
+           so we select that macro in the macro names combo box, by calling the select button handler.
+           We can also get here when the Installed box is getting filled.  If it's not empty we enable
+           the Select installed button, else it gets disabled."""
+        cb = self.form.ComboBoxInstalled
+        if cb.currentText():
+            self.form.selectInstalledButton.setEnabled(True)
+            self.onSelectInstalledButtonClicked()
+        else:
+            self.form.selectInstalledButton.setEnabled(False)
+
+    def onSelectInstalledButtonClicked(self):
+        self.updateVariables()
+        cbMacroName = self.form.ComboBoxMacroName
+        installedName = self.form.ComboBoxInstalled.currentText()
+
+        if installedName:
+            idx = cbMacroName.findText(installedName)
+            if idx == -1 and cbMacroName.count() != 0: #macro was probably deleted after being added to toolbar
+                cbMacroName.addItem(installedName) #so try to add so it can be removed
+                self.showMsg(f"{installedName} not in Macro names, adding it to it.","warning")
+            cbMacroName.setCurrentText(installedName)
+
+    def removeOrphans(self):
+        tm = self.tm()
+        if tm:
+            tm.removeOrphans()
+            self.updateInstalled()
+
+    def updateInstalled(self):
+        """update the installed macros combo box"""
+        tm = self.tm()
+        im = []
+        orphans = []
+        if tm:
+            im = tm.getInstalledMacros()
+            orphans = tm.getOrphans()
+        cbInstalled = self.form.ComboBoxInstalled
+        cbInstalled.clear()
+        self.form.ComboBoxInstalled.addItems(im)
+        if cbInstalled.currentText():
+            self.form.selectInstalledButton.setEnabled(True)
+        else:
+            self.form.selectInstalledButton.setEnabled(False)
+        if orphans:
+            self.showMsg(f"Orphans found: {orphans}.  You can remove them from the menu button.", "warning")
+
+    def onComboBoxCustomToolbarCurrentIndexChanged(self):
+        tm = self.tm()
+        if tm:
+            self.form.ComboBoxCustomToolbar.setToolTip(f"{self.tbName} real name: {tm.RealName}")
+        self.updateInstalled()
+        self.updateUi()
+
+    def onActiveCheckBoxClicked(self):
+        tm = self.tm()
+        if tm:
+            qt = tm.QToolbar
+            if not qt:
+                self.showMsg(f"Can't get QToolbar for toolbar {self.tbName}: workbench {self.wbName}","warning")
+                return
+            cb = self.form.activeCheckBox
+            qt.setVisible(cb.isChecked())
+            tm.Active = cb.isChecked()
+            icon_name = "Invisible" if not cb.isChecked() else "dagViewVisible"
+            self.iconize(self.form.activeCheckBox, system_name=icon_name)
+
+    def updateCustomToolbarComboBox(self):
+        """called by setupUi() and any time a toolbar is added or removed or renamed"""
+        customToolbars = ToolbarManager.getCustomToolbarNames(self.wbName)
+        self.form.ComboBoxCustomToolbar.clear()
+        self.form.ComboBoxCustomToolbar.addItems(customToolbars)
+        self.updateInstalled()
+
+    def updateMacroNames(self):
+        """updates the macro names in the macro name combo box"""
+
+        macroDir = FreeCAD.getUserMacroDir(True)
+        dirEntries = os.scandir(macroDir)
+        filenames = [de.name for de in dirEntries if de.is_file() and \
+                    bool(".py" in de.name or ".FCMacro" in de.name \
+                    or ".fcmacro" in de.name)]
+
+        #filter the filenames based on the content of the filter line edit
+        filterText = self.form.LineEditFilter.text()
+        filteredNames = self.filterFileNames(filenames, filterText)
+        self.form.ComboBoxMacroName.clear()
+        self.form.ComboBoxMacroName.addItems(filteredNames)
+        self.form.ComboBoxMacroName.setCurrentText(self.macroName)
+
+    def filterFileNames(self, filenames, filter):
+        filteredFilenames = []
+        try:
+            # Try to compile the filter_text as a regular expression
+            regex = re.compile(filter, re.IGNORECASE)
+            for filename in filenames:
+                if regex.search(filename):
+                    filteredFilenames.append(filename)
+        except re.error:
+            # If the regular expression is not valid, use a simple contains test
+            for filename in filenames:
+                if filter.lower() in filename.lower():
+                    filteredFilenames.append(filename)
+        return filteredFilenames
+
+    def setupUi(self):
+        """initial ui setup"""
+        self.updateCustomToolbarComboBox()
+
+        qlabels = [child for child in self.form.findChildren(QtGui.QLabel) \
+                                if child.objectName() != "iconLabel" \
+                                and child.objectName() != "extractedLabel"
+                                and child.objectName() != "statusLabel"]
+        maxWidthLabel = max(qlabels, key=lambda label: label.sizeHint().width())
+        for label in qlabels:
+            label.setFixedWidth(maxWidthLabel.sizeHint().width())
+
+        buttons = [child for child in self.form.findChildren(QtGui.QPushButton)\
+                         if child.objectName() != "closeButton"\
+                         and child.objectName() != "menuButton"]
+        maxWidthButton = self.form.removeMacroFromToolbarButton
+        for button in buttons:
+            button.setFixedWidth(maxWidthButton.sizeHint().width()+20)
+
+        self.updateMacroNames()
+
+        combos = [child for child in self.form.findChildren(QtGui.QComboBox)]
+                #  if child.objectName() != "ComboBoxWorkbench"]
+        combos.append(self.form.LineEditFilter) #make it same width as combo boxes
+        for combo in combos:
+            combo.setFixedWidth(250)
+
+        #statusLabel is where some messages are displayed at the bottom of
+        #the dialog, just above the Close button.  Keep this to 3 lines only
+        font_metrics = QtGui.QFontMetrics(self.form.statusLabel.font())
+        row_height = font_metrics.height()
+        required_height = 4 * row_height #add 1 to make a little extra space just in case
+        self.form.statusLabel.setFixedHeight(required_height)
+        self.form.statusLabel.setWordWrap(True)
+        self.iconize(self.form.selectIconFileButton, "SP_DialogOpenButton")
+        self.iconize(self.form.openHyperlinkButton, "SP_DriveNetIcon")
+        self.iconize(self.form.saveExtractedButton, "SP_DialogSaveButton")
+        self.iconize(self.form.fromMacroButton, "SP_FileDialogContentsView")
+        self.iconize(self.form.deleteToolbarButton, system_name="delete")
+        self.iconize(self.form.addMacroToToolbarButton, system_name="list-add")
+        self.iconize(self.form.removeMacroFromToolbarButton, system_name="list-remove")
+        self.iconize(self.form.renameToolbarButton, system_name="edit-edit")
+        self.iconize(self.form.makeIconButton, system_name="colors")
+        self.iconize(self.form.newToolbarButton, system_name="window-new")
+        self.iconize(self.form.selectInstalledButton, system_name="view-select")
+        self.iconize(self.form.systemIconButton, icon_theme_name="SP_ComputerIcon")
+       # self.iconize(self.form.preferencesButton, system_name="preferences-system")
+        menuIcon = self.QIconFromXPMString(self.getMenuIcon())
+        self.form.menuButton.setIcon(menuIcon)
+
+        icon_name = "Invisible" if not self.form.activeCheckBox.isChecked() else "dagViewVisible"
+        self.iconize(self.form.activeCheckBox, system_name=icon_name)
+        self.form.LineEditFilter.setFocus()
+
+    def iconize(self,button,icon_theme_name="",system_name=""):
+        """iconize widget, which could be button or checkbox from QStyle theme or system"""
+        if not system_name:
+            pixmapi = getattr(QtGui.QStyle, icon_theme_name)
+            button.setIcon(self.style().standardIcon(pixmapi))
+        else:
+            icon = FreeCADGui.getIcon(system_name)
+            button.setIcon(icon)
+
+    def updateUi(self):
+        """this gets called when we need to update the widgets"""
+        tm = self.tm()
+        if tm:
+            qtoolbar = tm.QToolbar
+            if qtoolbar:
+                self.form.activeCheckBox.setChecked(qtoolbar.isVisible())
+        if self.tbName:
+            self.form.deleteToolbarButton.setEnabled(True)
+            self.form.renameToolbarButton.setEnabled(True)
+            self.form.addMacroToToolbarButton.setEnabled(True)
+
+        else:
+            self.form.deleteToolbarButton.setEnabled(False)
+            self.form.renameToolbarButton.setEnabled(False)
+            self.form.addMacroToToolbarButton.setEnabled(False)
+
+
+        #sometimes a macro might have icon information embedded in the code
+        #we try to extract this information, which might be the path to
+        #the icon file, a url to download it, or XPM data stored as a string
+        content = self.form.PlainTextEditExtracted.toPlainText()
+        if not content:
+            self.form.openHyperlinkButton.setEnabled(False)
+            self.form.saveExtractedButton.setEnabled(False)
+            self.form.useAsPixmapButton.setEnabled(False)
+
+        if not self.menuText:
+            if self.macroName:
+                self.menuText = os.path.splitext(self.macroName)[0]
+
+        self.form.LineEditMenuText.setText(self.menuText)
+        self.form.LineEditToolTip.setText(self.tooltip)
+        self.form.LineEditStatusText.setText(self.statusText)
+        self.form.LineEditWhatsThis.setText(self.whatsThis)
+        self.form.LineEditShortcut.setText(self.shortcut)
+        self.form.LineEditPixmap.setText(self.pixmap)
+
+    # def showMsg(self, msg, typeId="normal"):
+    #     """put message in the message label below Close button"""
+    #     formattedMsg = ""
+    #     if typeId == "normal":
+    #         FreeCAD.Console.PrintMessage(msg+"\n")
+    #         formattedMsg = f'<span style="color: black;">{msg}</span><br/>'
+    #     elif typeId == "warning":
+    #         FreeCAD.Console.PrintWarning(msg+"\n")
+    #         formattedMsg = f'<span style="color: orange;">{msg}</span><br/>'
+    #     elif typeId == "error":
+    #         formattedMsg = f'<span style="color: red;">{msg}</span><br/>'
+    #         FreeCAD.Console.PrintError(msg+"\n")
+        #
+        # #we only keep and display the last 3 messages
+        # self.messages = [formattedMsg] + self.messages
+        # self.messages.pop()
+        # old = "\n".join(self.messages[1:3])
+        # self.form.statusLabel.setText(f"{formattedMsg}{old}")
+
+    def showMsg(self, msg, typeId="normal"):
+        """Put message in the message label below the Close button"""
+        formattedMsg = ""
+
+        if typeId == "normal":
+            formattedMsg = f'<span style="color: black;">{msg}</span><br/>'
+        elif typeId == "warning":
+            formattedMsg = f'<span style="color: orange;">{msg}</span><br/>'
+        elif typeId == "error":
+            formattedMsg = f'<span style="color: red;">{msg}</span><br/>'
+
+        # Check if the message is not the same as the last printed message
+        if formattedMsg != self.lastPrintedMsg:
+            # Print the message to the console using the appropriate print command
+            if typeId == "normal":
+                FreeCAD.Console.PrintMessage(msg + "\n")
+            elif typeId == "warning":
+                FreeCAD.Console.PrintWarning(msg + "\n")
+            elif typeId == "error":
+                FreeCAD.Console.PrintError(msg + "\n")
+
+            # Prepend the new message to the list
+            self.messages.insert(0, formattedMsg)
+
+            # Keep only the last 3 messages
+            if len(self.messages) > 3:
+                self.messages.pop()
+
+            # Update the QLabel with the last 3 messages
+            self.form.statusLabel.setText("".join(self.messages))
+
+            # Update the last printed message
+            self.lastPrintedMsg = formattedMsg
+
+
+
+    def download_file(self, url, default_folder, default_filename):
+        response = requests.get(url)
+        if response.status_code == 200:
+            file_name,ok = QtGui.QFileDialog.getSaveFileName(None, "Save File As", f"{default_folder}\{default_filename}")
+            if file_name:
+                with open(file_name, 'wb') as file:
+                    file.write(response.content)
+                    return file_name
+        return None
+
+    def openHyperlinkButtonClicked(self):
+        url = self.form.PlainTextEditExtracted.toPlainText()
+        macroBaseName = os.path.splitext(self.form.ComboBoxMacroName.currentText())[0]
+        fn = os.path.basename(url)
+        ext = os.path.splitext(fn)[1]
+        iconFolders = self.getIconFolders()
+        if iconFolders:
+            default_folder = iconFolders[0]
+        else:
+            default_folder = FreeCAD.getUserMacroDir(True)
+        default_filename = f"{macroBaseName}_icon{ext}"
+        file_name = self.download_file(url,default_folder,default_filename)
+        if file_name:
+            self.form.LineEditPixmap.setText(file_name)
+            self.handlePixmap()
+
+    def saveXPMFile(self, default_folder, default_filename, content):
+        file_name, ok = QtGui.QFileDialog.getSaveFileName(None, \
+                                        "Save File As",\
+                                        f"{default_folder}\{default_filename}")
+        if file_name:
+            with open(file_name, 'w') as file:
+                file.write(content)
+                return file_name
+        return None
+
+    def saveExtractedButtonClicked(self): #Save XPM button
+        macroBaseName = os.path.splitext(self.form.ComboBoxMacroName.currentText())[0]
+        ext = ".xpm"
+        iconFolders = self.getIconFolders()
+        if iconFolders:
+            default_folder = iconFolders[0]
+        else:
+            default_folder = FreeCAD.getUserMacroDir(True)
+        default_filename = f"{macroBaseName}_icon{ext}"
+        content = self.form.PlainTextEditExtracted.toPlainText()
+        file_name = self.saveXPMFile(default_folder,default_filename,content)
+        if file_name:
+            self.form.LineEditPixmap.setText(file_name)
+            self.handlePixmap()
+
+    def useAsPixmapButtonClicked(self):
+        content = self.form.PlainTextEditExtracted.toPlainText()
+        if len(content) > 255:
+            self.showMsg("Content is too big for Pixmap field.  "+
+            "We don't want to enlarge too much our configuration files.  Save as XPM instead if it's an XPM definition.","error")
+            return
+        self.form.LineEditPixmap.setText(content)
+        self.handlePixmap()
+
+    def showExtracted(self, value):
+        """show content extracted from macro file in a QPlainTextEdit"""
+        #first clear the plain text edit of any existing content
+        edit = self.form.PlainTextEditExtracted
+        edit.setPlainText("")
+        if value:
+            edit.setPlainText(value)
+            self.form.openHyperlinkButton.setEnabled(True)
+            self.form.saveExtractedButton.setEnabled(True)
+            self.form.useAsPixmapButton.setEnabled(True)
+
+    def addMacroToToolbarButtonClicked(self):
+        self.updateVariables()
+        if not self.menuText:
+            self.showMsg("Menu text field cannot be empty.","error")
+            return
+
+        if not self.tbName:
+            self.showMsg("No custom toolbar.  Create one first.","error")
+            return
+        tm = self.tm()
+        if not tm:
+            self.showMsg("Unable to get toolbar manager instance for {self.tbName}:{self.wbName}","error")
+            return
+        exists = tm.isInstalled(self.macroName)
+        if exists:
+            tm.uninstallMacroFromToolbar(self.macroName)
+            self.showMsg(f"Removing and re-installing {self.macroName} to {self.tbName} for workbench: {self.wbName}","warning")
+
+        macroObject = Macro(self.macroName, \
+                                self.menuText, \
+                                self.tooltip, \
+                                self.statusText, \
+                                self.whatsThis, \
+                                self.shortcut, \
+                                self.pixmap)
+        command_name = tm.addMacroToToolbar(macroObject)
+        self.updateInstalled()
+        self.form.ComboBoxInstalled.setCurrentText(macroObject.macroName)
+        if command_name:
+            self.showMsg(f"Added {self.macroName} to {self.tbName} -> workbench:{tm.Workbench}, command name: {command_name}","normal")
+
+    def removeMacroFromToolbarButtonClicked(self):
+        """We remove the macro from the toolbar, but we don't delete the macro action"""
+        tm = self.tm()
+        if not tm:
+            self.showMsg(f"Error getting instance of toolbar manager for toolbar {self.tbName}: workbench {self.wbName}","error")
+            return
+        if tm.uninstallMacroFromToolbar(self.macroName):
+            self.showMsg(f"{self.macroName} removed from {self.tbName} -> workbench:{self.wbName}","normal")
+        else:
+            self.showMsg(f"Error removing {self.macroName} from {self.tbName} --> workbench:{self.wbName}","error")
+        macroName = self.macroName
+        self.updateInstalled()
+        self.form.ComboBoxMacroName.setCurrentText(macroName)
+        self.updateUi()
+
+
+    def tm(self):
+        """we get the ToolbarManager instance if we can (if both toolbar name and workbench name are defined)
+           but if both are not defined we don't call the constructor, but instead return None.  Callers must
+           always test the return value against None before attempting to use the object."""
+        if self.wbName and self.tbName:
+            return ToolbarManager(self.tbName, self.wbName)
+        else:
+            return None
+
+    def onComboBoxMacroNameCurrentIndexChanged(self, index):
+        """user has selected a different macro name or possibly it has been updated from code during
+           setup or if a filter has caused it to get rebuilt"""
+        tm = self.tm()
+        if tm:
+            self.form.removeMacroFromToolbarButton.setEnabled(tm.isInstalled(self.macroName))
+
+        command = FreeCADGui.Command.findCustomCommand(self.macroName)
+        if command:
+            descriptor = FreeCADGui.CommandAction(command)
+            cmdObj = descriptor.getCommand()
+            commandDict = cmdObj.getInfo()
+            self.form.LineEditMenuText.setText(commandDict['menuText'])
+            self.form.LineEditToolTip.setText(commandDict['toolTip'])
+            self.form.LineEditStatusText.setText(commandDict['statusTip'])
+            self.form.LineEditWhatsThis.setText(commandDict['whatsThis'])
+            self.form.LineEditShortcut.setText(commandDict['shortcut'])
+            self.form.LineEditPixmap.setText(commandDict['pixmap'])
+        else:
+            self.form.LineEditMenuText.setText(os.path.splitext(self.macroName)[0])
+            self.form.LineEditToolTip.setText('')
+            self.form.LineEditStatusText.setText('')
+            self.form.LineEditWhatsThis.setText('')
+            self.form.LineEditShortcut.setText('')
+            self.form.LineEditPixmap.setText('')
+        self.handlePixmap()
+        self.updateVariables()
+        self.updateUi()
+
+    def getToolbarName(self,default="MyToolbar"):
+        """get new name for custom toolbar, used when making new toolbar or renaming another"""
+        val,ok = QtGui.QInputDialog.getText(self.form,"Macro Toolbar Manager Input","Enter name for toolbar:",text=default)
+        if ok:
+            return val
+        else:
+            return None
+
+    def getIconFolders(self):
+        bitmapsGroup = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Bitmaps")
+        customPathNames = bitmapsGroup.GetStrings()
+        iconFolders = [bitmapsGroup.GetString(cpn) for cpn in customPathNames]
+        return iconFolders
+
+    def selectIconFileButtonClicked(self):
+        """first icon folder is the default, else we use the user macro directory"""
+        iconFolders = self.getIconFolders()
+        if iconFolders:
+            default = iconFolders[0]
+        else:
+            default = FreeCAD.getUserMacroDir(True)
+        fileName, ok = QtGui.QFileDialog.getOpenFileName(self,
+                                           "Select icon image file",
+                                           default,
+                                           "Images (*.xpm *.jpg *.svg *.jpeg *.bmp *.png *.ico);;All Files (*)")
+        if fileName:
+            self.form.LineEditPixmap.setText(os.path.normpath(fileName))
+            self.handlePixmap()
+
+    def fromMacroButtonClicked(self):
+        """extract icon information embedded in some macro files as __xpm__ or __icon__ string variables"""
+        fullpath = os.path.join(FreeCAD.getUserMacroDir(True), \
+                                self.form.ComboBoxMacroName.currentText())
+
+        delimiters = ["3dq", "3sq", "sq", "dq"] #3dq = triple double quotes, etc.
+        varnames = ["__xpm__", "__icon__"]
+        value = None
+        bFound = False
+
+        for delimiter in delimiters:
+            for varname in varnames:
+                #print(f"calling extractIconValues with:{varname},{delimiter}")
+                value = self.extractIconValues(fullpath, varname, delimiter)
+                if value is not None and len(value) > 5:
+                    bFound = True
+                    break
+            if bFound and len(value) > 5:
+                break
+
+        if not bFound:
+            self.showMsg(f"Unable to extract __xpm__ or __icon__ information from " +\
+                          f"{self.form.ComboBoxMacroName.currentText()}\n","normal")
+            return
+
+        self.showExtracted(value) #puts in QPlainTextEdit
+
+    def extractIconValues(self, file_path, varname="__icon__", delimiter_type = "3sq"):
+        """we search for __icon__ and __xpm__ defines in the macro text using this function"""
+        DEBUG_PRINT = False
+
+        try:
+            with open(file_path, 'r') as file:
+                content = file.read()
+
+            # Convert varname and content to lowercase for case-insensitive search to match __XPM__ or __ICON__, too
+            varname = varname.lower()
+            content_lower = content.lower()
+
+            # Define the variable search pattern based on the delimiter type
+            # It seemed simpler to code this way, so it can be called multiple
+            # times to look for the various potential string delimiters
+            if delimiter_type == "3sq":
+                delimiter = "'''"
+            elif delimiter_type == "3dq":
+                delimiter = '"""'
+            elif delimiter_type == "sq":
+                delimiter = "'"
+            elif delimiter_type == "dq":
+                delimiter = '"'
+            else:
+                raise ValueError("Invalid delimiter_type. Use '3sq', '3dq', 'sq', or 'dq'.")
+
+            # Search for the variable definition with varname at the beginning of a line
+            # varname might be __icon__ or __xpm__, depending on what we called this function using
+            # the test is, first we look for __icon__ or __xpm__ (case insensitive) at the start of a line
+            # then it must be followed by an = sign and by the sought after delimiter
+            # there must be no other characters other than space or \n between varname and = sign
+            # then there must be no other characters other than space or \n between the = sign and the delimiter
+            # then we search for the next occurrence of the delimiter and accept all characters between the delimiters
+            # as the variable definition
+            var_start = content_lower.find(f"\n{varname}")
+            if var_start != -1:
+                eq_index = content.find("=", var_start)
+                if eq_index != -1:
+                    varname_to_eq = content[var_start + len(varname) + 1: eq_index]  # Add 1 to skip the newline
+                    # Ensure only whitespaces (spaces or carriage returns) between varname and =
+                    if all(char in " \n" for char in varname_to_eq):
+                        delimiter_start = content.find(delimiter, eq_index)
+                        if delimiter_start != -1:
+                            delimiter_end = content.find(delimiter, delimiter_start + len(delimiter))
+                            if delimiter_end != -1:
+                                # Ensure only whitespaces (spaces or carriage returns) between = and delimiter
+                                between_eq_and_delimiter = content[eq_index + 1: delimiter_start]
+                                if all(char in " \n" for char in between_eq_and_delimiter):
+                                    value = content[delimiter_start+len(delimiter): delimiter_end]
+                                    if value and value[0] == "\n": #XPM is invalid if first line is empty
+                                        value = value[1:]
+                                    return value
+                                elif DEBUG_PRINT:
+                                    print("Invalid characters found between = and delimiter:",\
+                                           between_eq_and_delimiter)
+                            elif DEBUG_PRINT:
+                                print(f"Delimiter '{delimiter}' not found after '='.")
+                        elif DEBUG_PRINT:
+                            print(f"Delimiter '{delimiter}' not found after '='.")
+                    elif DEBUG_PRINT:
+                        print("Invalid characters found between varname and '=':", varname_to_eq)
+                elif DEBUG_PRINT:
+                    print("= not found after varname.")
+            elif DEBUG_PRINT:
+                print(f"{varname} not found in the file.")
+            return None
+        except FileNotFoundError:
+            print(f"File not found: {file_path}")
+            return None
+
+    def newToolbarButtonClicked(self):
+        """user is creating a new toolbar, note we must call constructor with
+           bCreate = True to create the toolbar manager.  We also cannot use
+           the self.tm() convenience method because we need to set bCreate to True"""
+        newName = self.getToolbarName()
+        if newName and self.wbName:
+            tm = ToolbarManager(newName, self.wbName, bCreate = True)
+            self.showMsg(f"New toolbar created: {newName}")
+            self.updateCustomToolbarComboBox()
+
+    def renameToolbarButtonClicked(self):
+        if not self.tbName:
+            self.showMsg("No toolbar to rename.  Create one first.", "error")
+            return
+        tm = self.tm()
+        if not tm:
+            self.showMsg(f"Error getting toolbar manager for toolbar {tbName}: workbench {wbName}","error")
+        newName = self.getToolbarName(self.tbName)
+        if newName:
+            tm.renameToolbar(newName)
+            self.updateCustomToolbarComboBox()
+            self.tbName = newName
+
+    def deleteToolbarButtonClicked(self):
+        self.updateVariables()
+
+        msg = QtGui.QMessageBox()
+        msg.setIcon(QtGui.QMessageBox.Warning)
+        msg.setText(f"Do you want to delete the toolbar:\n{self.tbName}?")
+        msg.setWindowTitle("Delete Toolbar Confirmation")
+        msg.setStandardButtons(QtGui.QMessageBox.Yes | QtGui.QMessageBox.No)
+        msg.setDefaultButton(QtGui.QMessageBox.No)
+
+        result = msg.exec_()
+
+        if result == QtGui.QMessageBox.Yes:
+            tm = self.tm()
+            if tm:
+                tm.removeToolbar()
+                self.showMsg(f"custom toolbar: {self.tbName} removed -> workbench:{self.wbName}","normal")
+            else:
+                self.showMsg(f"Error deleting toolbar for toolbar:{self.tbName} for workbench:{self.wbName}.", "error")
+            self.updateCustomToolbarComboBox()
+            self.updateUi()
+
+        else:
+            self.showMsg(f"User canceled.  The toolbar {self.tbName} has not been deleted.")
+
+
+
+    def reject(self):
+        self.form.close()
+
+    def getMenuIcon(self):
+        width, height = 64, 64
+        icon = ["\n/* XPM */"]
+        icon.append(f"static char *icon_xpm[] = {{")
+        icon.append(f"/* cols rows colors chars-per-color */")
+        icon.append(f'"{width} {height} 2 1",')
+        icon.append(f'"  c None",')
+        icon.append(f'". c Black",')
+        icon.append('/*pixels*/')
+        emptyLine = '"'+' ' * width + '",'
+        stripe = '"'+'.' * width + '",'
+        linesWithStripes = [11,12,13,14, 31,32,33,34, 51,52,53,54]
+        for y in range(height):
+            line = emptyLine if not y in linesWithStripes else stripe
+            icon.append(line)
+        icon.append("};")
+        ret = "\n".join(icon)
+        return ret
+
+
+class SystemIconSelector(QtGui.QDialog):
+    """creates a dialog of icon buttons for the user to select from among available system icons
+       These basenames are filenames from the 0.22 source code in src/Gui/Icons"""
+    def __init__(self, parseModFolder, cte):
+        self.cte = cte #to use with showMsg()
+        self.basenames = ['AddonManager', 'Document', 'DrawStyleAsIs', 'DrawStyleFlatLines', 'DrawStyleHiddenLine', \
+'DrawStyleNoShading', 'DrawStylePoints','DrawStyleShaded', 'DrawStyleWireFrame', 'Feature', 'Geofeaturegroup',\
+'Group', 'Invisible', 'Link', 'LinkArray', 'LinkArrayOverlay', 'LinkElement', 'LinkGroup', 'LinkImport',\
+'LinkImportAll', 'LinkOverlay', 'LinkReplace', 'LinkSelect', 'LinkSelectAll', 'LinkSelectFinal', \
+'LinkSub', 'LinkSubElement', 'LinkSubOverlay', 'MacroEditor', 'Param_Bool', 'Param_Float',\
+'Param_Int', 'Param_Text', 'Param_UInt', 'Part_Measure_Clear_All', 'Part_Measure_Toggle_All', 'PolygonPick', \
+'Python', 'SpNav-PanLR', 'SpNav-PanUD', 'SpNav-Roll', 'SpNav-Spin', 'SpNav-Tilt', 'SpNav-Zoom', 'Std_Axis', \
+'Std_CoordinateSystem', 'Std_CoordinateSystem_alt', 'Std_Placement', 'Std_Plane', 'Std_Tool1', 'Std_Tool10', \
+'Std_Tool11', 'Std_Tool12', 'Std_Tool2', 'Std_Tool3', 'Std_Tool4', 'Std_Tool5', 'Std_Tool6', 'Std_Tool7', \
+'Std_Tool8', 'Std_Tool9', 'Std_ViewScreenShot', 'Std_WindowCascade', 'Std_WindowNext', 'Std_WindowPrev', \
+'Std_WindowTileVer', 'TextDocument', 'Tree_Annotation', 'Tree_Dimension', 'Tree_Python', 'Unlink', 'WhatsThis', \
+'accessories-calculator', 'accessories-text-editor', 'application-exit', 'applications-accessories', 'applications-python',\
+'background', 'bound-expression', 'bound-expression-unset', 'breakpoint', 'bulb', 'button_add_all', 'button_down', \
+'button_invalid', 'button_left', 'button_right', 'button_sort', 'button_up', 'button_valid', 'camera-photo', 'colors', \
+'dagViewFail', 'dagViewPass', 'dagViewPending', 'dagViewVisible', 'debug-marker', 'debug-start', 'debug-stop', 'delete', \
+'document-new', 'document-open', 'document-package', 'document-print', 'document-print-preview', 'document-properties', \
+'document-python', 'document-save', 'document-save-as', 'edit-cleartext', 'edit-copy', 'edit-cut', 'edit-delete', \
+'edit-edit', 'edit-element-select-box', 'edit-paste', 'edit-redo', 'edit-select-all', 'edit-select-box', 'edit-undo', \
+'edit_Cancel', 'edit_OK', 'folder', 'freecad', 'freecad-doc', 'freecadsplash', 'help-browser',\
+'internet-web-browser', 'list-add', 'list-remove', \
+'media-playback-start', 'media-playback-stop', 'media-record', 'mouse_pointer', 'preferences-display', \
+'preferences-general', 'preferences-import-export', 'preferences-system', 'process-stop', 'px', \
+'sel-back', 'sel-bbox', 'sel-forward', 'sel-instance', 'spaceball_button', 'tree-doc-collapse', 'tree-doc-multi', \
+'tree-doc-single', 'tree-goto-sel', 'tree-item-drag', 'tree-pre-sel', 'tree-rec-sel', 'tree-sync-pla', 'tree-sync-sel', \
+'tree-sync-view', 'user', 'utilities-terminal', 'view-axonometric', 'view-bottom', 'view-front', 'view-fullscreen', \
+'view-isometric', 'view-left', 'view-measurement', 'view-perspective', 'view-rear', 'view-refresh', 'view-right', \
+'view-rotate-left', 'view-rotate-right', 'view-select', 'view-top', 'view-unselectable', 'window-new', 'zoom-all', \
+'zoom-border', 'zoom-fit-best', 'zoom-in', 'zoom-out', 'zoom-selection']
+
+        super(SystemIconSelector, self).__init__()
+        self.setWindowTitle("System Icon Selector")
+
+        self.parseModFolder = parseModFolder #whether to parse Mod folder for more icons
+
+        layout = QtGui.QGridLayout()
+        scrollArea = QtGui.QScrollArea(self)
+        scrollArea.setWidgetResizable(True)
+        qwidget = QtGui.QWidget()
+        qwidget.setLayout(layout)
+        scrollArea.setWidget(qwidget)
+        self.icon_text = ""
+
+        def trigger(val):
+            return lambda : self.setIconText(val)
+
+        #we make a grid of clickable icon buttons the user can choose from for a toolbar icon
+        iconCount = 0
+        for n, name in enumerate(self.basenames):
+            try:
+                btn = QtGui.QPushButton()
+                btn.installEventFilter(self)
+                btn.setToolTipDuration(2)
+                icon = FreeCADGui.getIcon(name)
+                if icon:
+                    btn.setIcon(icon)
+                    btn.setToolTip(name)
+                    btn.clicked.connect(trigger(name))
+                layout.addWidget(btn, n // 8, n % 8)  # Use integer division (//) for row
+                iconCount += 1
+            except Exception as e:
+                pass
+
+        imgFiles = self.findMoreIcons()
+        for n, filename in enumerate(imgFiles):
+            try:
+                btn = QtGui.QPushButton()
+                btn.installEventFilter(self)
+                btn.setToolTipDuration(2)
+                icon = QtGui.QIcon(filename)
+                if icon:
+                    btn.setIcon(icon)
+                    btn.setToolTip(filename)
+                    btn.clicked.connect(trigger(filename))
+                    layout.addWidget(btn, iconCount // 8, iconCount % 8)
+                    iconCount += 1
+            except Exception as e:
+                pass
+
+
+        # Set the layout of the main window
+        main_layout = QtGui.QVBoxLayout()
+        main_layout.addWidget(scrollArea)
+        self.setLayout(main_layout)
+
+    def show_custom_tooltip(self, widget, pixmap, txt):
+        self.tooltip_widget = QtGui.QWidget(self)
+        self.tooltip_widget.setWindowFlags(QtCore.Qt.ToolTip)
+        self.tooltip_widget.setGeometry(widget.mapToGlobal(widget.rect().topLeft()).x() + 40,
+                                        widget.mapToGlobal(widget.rect().topLeft()).y() + 40,
+                                        pixmap.width() + 10, pixmap.height() + 30)  # Adjust size for text
+
+        layout = QtGui.QVBoxLayout(self.tooltip_widget)
+
+        label = QtGui.QLabel(self.tooltip_widget)
+        label.setPixmap(pixmap)
+        label.setAlignment(QtCore.Qt.AlignCenter)
+
+        text_label = QtGui.QLabel(txt, self.tooltip_widget)
+        text_label.setAlignment(QtCore.Qt.AlignCenter)
+
+        layout.addWidget(label)
+        layout.addWidget(text_label)
+
+        self.tooltip_widget.setLayout(layout)
+
+        self.tooltip_widget.show()
+
+        timer = QtCore.QTimer(self)
+        timer.setSingleShot(True)
+        timer.start(1500)
+        timer.timeout.connect(self.tooltip_widget.close)
+
+    def eventFilter(self, obj, event):
+        if event.type() == event.ToolTip and type(obj) == QtGui.QPushButton:
+            # Create a custom tooltip with an enlarged icon using a QLabel
+            icon = obj.icon()
+            pixmap = icon.pixmap(100, 100)  # Set the desired enlarged size
+
+            # Show the custom tooltip when the mouse enters the button
+            txt = obj.toolTip()
+            self.show_custom_tooltip(obj, pixmap, txt)
+
+            return True
+        return super().eventFilter(obj, event)
+
+    def parseFolder(self, folder):
+        """parse folder for image files"""
+        self.cte.showMsg(f"\nParsing {folder}...")
+        FreeCADGui.updateGui()
+        time.sleep(0.01)
+        dirEntries = os.scandir(folder)
+
+        filepaths = [os.path.join(folder, de.name) for de in dirEntries if de.is_file() and
+                    bool(".svg" in de.name \
+                    or ".xpm" in de.name \
+                    or ".jpg" in de.name \
+                    or ".jpeg" in de.name \
+                    or ".png" in de.name \
+                    or ".bmp" in de.name \
+                    or ".ico" in de.name)]
+        return filepaths
+
+    def findMoreIcons(self):
+        """look through user-defined icon folders"""
+        bitmapsGroup = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Bitmaps")
+        strings = bitmapsGroup.GetStrings()
+        folders = [bitmapsGroup.GetString(string) for string in strings]
+
+        filenames = []
+        for folder in folders:
+            files = self.parseFolder(folder)
+            if files:
+                filenames.extend(files)
+        #now search workbenches installed in Mod folder
+        if self.parseModFolder:
+            userFolder = FreeCAD.getUserConfigDir() if hasattr(FreeCAD,"getUserConfigDir") else FreeCAD.getUserAppDataDir()
+            modFolder = os.path.join(userFolder,"Mod")
+            filenames.extend(self.parseWorkbenchImages(modFolder))
+        return filenames
+
+    def isSmallImage(self, file_path, max_width=64, max_height=64):
+        try:
+            with PIL.Image.open(file_path) as img:
+                width, height = img.size
+                return width <= max_width and height <= max_height
+        except:
+            if file_path.endswith(".svg"):
+                return True
+
+    def parseWorkbenchImages(self, modFolder):
+        image_extensions = (".svg", ".xpm", ".jpg", ".jpeg", ".png", ".bmp", ".ico")
+        image_files = []
+
+        for root, _, files in os.walk(modFolder):
+            for file in files:
+                if file.endswith(image_extensions):
+                    file_path = os.path.join(root, file)
+                    self.cte.showMsg(f"Parsing {file_path}...")
+                    FreeCADGui.updateGui()
+                    time.sleep(0.01)
+                    if self.isSmallImage(file_path, max_width=128, max_height=128):
+                        image_files.append(file_path)
+
+        return image_files
+
+    def setIconText(self,value):
+        self.icon_text = value
+        self.close()
+
+class Macro:
+    """holds macro name, tooltip, etc."""
+    def __init__(self, macroName="", \
+                        menuText="", \
+                        tooltip = "", \
+                        statusText = "", \
+                        whatsThis = "", \
+                        shortcut = "", \
+                        pixmap = "",\
+                        ):
+
+        self.macroName = macroName
+        self.menuText = menuText
+        self.tooltip = tooltip
+        self.statusText = statusText
+        self.whatsThis = whatsThis
+        self.shortcut = shortcut
+        self.pixmap = pixmap
+
+class ToolbarManager:
+    """a helper class for manipulating custom toolbars
+
+    Credit to the developers of AddonManager as much of this
+    code was borrowed from there and modified, for better or worse.
+
+    static methods:
+    ToolbarManager.refreshToolbar() #reloads the currently active workbench
+
+    tm = ToolbarManager(toolbarName, workbenchName, bCreate = False)
+    If bCreate = True, then if a toolbar named toolbarName does not exist for workbenchName,
+    it will be created autmatically.  Default constructor ToolbarManager() is not supported.
+
+    tm.QToolbar -- returns the QToolBar object associated with this toolbar, or None
+    tm.Name -- the name of the toolbar, e.g. MyToolbar, can also be used for renaming it
+    tm.removeToolbar() -- removes the toolbar and deletes it
+    tm.Active -- whether the toolbar is active or not, is also a setter for this property.
+    tm.Active = False will hide the toolbar and make it inactive, meaning it will remain hidden
+    after restarting.  tm.Active = True will make it active and visible.
+
+    tm.Workbench -- returns the workbench name or sets it to a new name.
+    tm.RealName -- returns the real name of the toolbar, e.g. Custom1
+    ToolbarManager.getCustomToolbarNames(wbName) --static method, returns names of all custom toolbars
+    for the given workbench name.  If wbName is "Global", then it returns all the global custom toolbars
+
+    ToolbarManager.exists(tbName, wbName) -- static method, boolean return True if toolbar exists
+    tm.CustomToolbarNames -- returns all custom toolbar names for the workbench this object was created for
+    tm.TopGroup -- ParameterGrp object: BaseApp/Workbench/{wbName}/Toolbar (parent of this toolbar object)
+    tm.Groups -- list of names of toolbars for this workbench, e.g. ["Custom1","Custom2"]
+    tm.isInstalled(macroName) -- boolean, whether macro is installed on this toolbar
+    tm.Group -- ParameterGrp object for this toolbar, e.g. BaseApp/Workbench/Global/Toolbar/Custom2
+    tm.getOtherGroup(gpName) -- used to get another sibling ParameterGrp object
+    ToolbarManager.refreshToolbar() -- static method, refreshes toolbar by reloading active workbench
+    tm.renameToolbar(newName) -- renames the toolbar
+    tm.newToolbar(tbName) -- creates new toolbar for the workbench already associated with this object
+    Alternatively, use tm = ToolbarManager(tbName, wbName, bCreate=True)
+
+    ToolbarManager.getAllMacroCommandsWithActions() -- static method, returns list of all macro commands
+    with actions in the form of ["Std_Macro_1","Std_Macro_3", etc.]  Note: not all macros with actions are
+    installed to toolbars.  When removing a macro from a toolbar, we don't delete the action because it
+    might be on another toolbar.
+
+    tm.removeMacroAction(macroName) -- deletes the macro action.  If the macro is on a toolbar it will
+    disappear, left as an orphan in parameters.  You should remove from the toolbar(s) first, then remove
+    the action.
+
+    tm.getMacroName(commandName) -- returns the macro name, e.g. "MyMacro.FCMacro" from its commandName,
+    e.g. "Std_Macro_23"
+
+    tm.getInstalledMacros() -- returns a list of macro names that are installed on this toolbar
+    tm.MacrosGroup -- returns ParameterGrp object BaseApp/Macro/Macros
+    tm.addMacroAction(macroObject) -- creates the action, but doesn't add to any toolbar.  Argument is a
+    Macro class object, see Macro class.
+
+    tm.addMacroToToolbar(macroObject) -- creates the action, and adds macro to the toolbar.  If the action
+    already exists it gets removed and a new one created.
+
+    tm.getCommandName(macroName) -- translates macro name into command name, e.g. Mymacro.FCMacro -> Std_Macro_0
+    tm.uninstallMacroFromToolbar(macroName, bRemoveAction = False) -- removes macro from toolbar, deletes action
+    if bRemoveAction = True
+
+    """
+    def __init__(self,name,workbench,bCreate = False):
+        """name is the name the user gives to the toolbar, e.g. MyMacroToolbar"""
+        if not name and workbench:
+            raise Exception("unsupported creation method, must provide both name and workbench name")
+        self.name = name
+        self.workbenchName = workbench
+        if bCreate and not ToolbarManager.exists(self.name, self.workbenchName):
+            FreeCAD.Console.PrintMessage(f"Creating new toolbar: {name} for workbench: {workbench}\n")
+            self.newToolbar(self.name)
+
+    @property
+    def QToolbar(self):
+        #FreeCAD.Console.PrintMessage(f"Getting QToolBar for {self.Name}\n")
+        self.qtoolbar = FreeCADGui.getMainWindow().findChild(QtGui.QToolBar,self.Name)
+        return self.qtoolbar
+
+    @property
+    def Name(self):
+        return self.name
+
+    @Name.setter
+    def Name(self,name):
+        """renames toolbar"""
+        self.renameToolbar(name)
+
+    def removeToolbar(self):
+        """remove this custom toolbar"""
+        self.TopGroup.RemGroup(self.RealName) #RealName is e.g. Custom1, not user-friendly label
+        ToolbarManager.refreshToolbar()
+
+    @property
+    def Active(self):
+        """returns boolean whether this toolbar is active"""
+        return self.Group.GetBool("Active")
+
+    @Active.setter
+    def Active(self, bActive):
+        """sets Active based on bActive argument"""
+        self.Group.SetBool("Active",bActive)
+
+    @property
+    def Workbench(self):
+        return self.workbenchName
+
+    @Workbench.setter
+    def Workbench(self, newBench):
+        self.__init__(self.name, newBench)
+
+    @property
+    def RealName(self):
+        """RealName is the name in the parameters for this group, e.g. Custom_1"""
+        groups = self.Groups
+        names = []
+        for group in groups:
+            toolbar = self.TopGroup.GetGroup(group)
+            name = toolbar.GetString("Name","")
+            if name == self.Name:
+                return group
+        if self.Name:
+            FreeCAD.Console.PrintError(f"Unable to find custom toolbar real name for {self.Name}\n")
+        return None
+
+    @staticmethod
+    def getCustomToolbarNames(wbName):
+        """return the names of all the custom toolbars for this workbench"""
+        topGroup = FreeCAD.ParamGet(f"User parameter:BaseApp/Workbench/{wbName}/Toolbar")
+        groups = topGroup.GetGroups()
+        names = []
+        for group in groups:
+            toolbar = topGroup.GetGroup(group)
+            name = toolbar.GetString("Name","")
+            if name:
+                names.append(name)
+        return names
+
+    @staticmethod
+    def exists(tbName, wbName):
+        """check of there is a toolbar name of tbName in wbName"""
+        topGroup = FreeCAD.ParamGet(f"User parameter:BaseApp/Workbench/{wbName}/Toolbar")
+        groups = topGroup.GetGroups()
+        for group in groups:
+            toolbar = topGroup.GetGroup(group)
+            name = toolbar.GetString("Name","")
+            if name == tbName:
+                return True
+        return False
+
+    @property
+    def CustomToolbarNames(self):
+        """get a list of the names of the current global custom toolbars"""
+        # parameter group hierarchy is as follows:
+        # BaseApp/Workbench/Global/Toolbar/(here we have the toolbar groups, e.g. Custom1)
+        # Custom1 will have these parameters:
+        # Active - boolean
+        # Name - name of the toolbar, e.g. MyMacrosToolbar
+        # Std_Macro_NNN where NNN can be anything from 0 to 99 or whatever - strings - "FreeCAD"
+        groups = self.Groups
+        names = []
+        for group in groups:
+            toolbar = self.TopGroup.GetGroup(group)
+            name = toolbar.GetString("Name","")
+            if name:
+                names.append(name)
+        return names
+
+    @property
+    def TopGroup(self):
+        return FreeCAD.ParamGet(f"User parameter:BaseApp/Workbench/{self.workbenchName}/Toolbar")
+
+    @property
+    def Groups(self):
+        """string list of group names, e.g. Custom1, Custom2"""
+        return self.TopGroup.GetGroups()
+
+    def isInstalled(self,macroName) -> bool:
+        """Returns True if a macro already in toolbar, or False if not."""
+        installed = self.getInstalledMacros()
+        #FreeCAD.Console.PrintMessage(f"installed = {installed}, {macroName} in installed = {macroName in installed}\n")
+        if installed:
+            return macroName in installed
+        else:
+            return False
+
+    @property
+    def Group(self):
+        """ParameterGrp object, this toolbar"""
+        custom_toolbars = self.Groups
+        for toolbar in custom_toolbars:
+            group = FreeCAD.ParamGet(f"User parameter:BaseApp/Workbench/{self.workbenchName}/Toolbar/" + toolbar)
+            group_name = group.GetString("Name", "")
+            if group_name == self.name:
+                return group
+        return None
+
+    def getOtherGroup(self, name):
+        """Try to find a toolbar group with a given name, e.g. MyMacroToolbar. Returns
+        the preference group for the toolbar if found, or None if it does not exist."""
+        #top_group = FreeCAD.ParamGet(f"User parameter:BaseApp/Workbench/{self.workbenchName}/Toolbar")
+        #custom_toolbars = top_group.GetGroups()
+        for toolbar in self.Groups:#custom_toolbars:
+            group = FreeCAD.ParamGet(f"User parameter:BaseApp/Workbench/{self.workbenchName}/Toolbar/" + toolbar)
+            group_name = group.GetString("Name", "")
+            if group_name == name:
+                return group
+        return None
+
+    @staticmethod
+    def refreshToolbar():
+        wb = FreeCADGui.activeWorkbench()
+        wb.reloadActive()
+
+    def renameToolbar(self, newName):
+        """rename the toolbar to newName"""
+        bSuccess = False
+        #FreeCAD.Console.PrintMessage(f"renameToolbar({newName}) custom_toolbars = {custom_toolbars}\n")
+        for toolbar in self.Groups:
+            group_name = self.TopGroup.GetGroup(toolbar).GetString("Name", "")
+            #FreeCAD.Console.PrintMessage(f"group_name = {group_name}, self.Name = {self.Name}\n")
+            if group_name == self.Name:
+                FreeCAD.Console.PrintMessage(f"renamed toolbar from {self.Name} to {newName}\n")
+                self.TopGroup.GetGroup(toolbar).SetString("Name",newName)
+                ToolbarManager.refreshToolbar()
+                bSuccess = True
+        if not bSuccess:
+            FreeCAD.Console.PrintError(f"Something went wrong renaming {self.Name} to {newName}\n")
+
+    def newToolbar(self, toolbarName) -> object:
+        """Create a new custom toolbar and returns its preference group."""
+
+        # We need two names: the name of the auto-created toolbar, as it will be displayed to the
+        # user in various menus, and the underlying name of the toolbar group. Both must be
+        # unique.
+
+        # First, the displayed name
+
+        if not toolbarName:
+            raise Exception("Must specify name for new toolbar")
+
+        name_taken = self.getOtherGroup(toolbarName)
+        if name_taken:
+            i = 2  # Don't use (1), start at (2)
+            while True:
+                test_name = toolbarName + f" ({i})"
+                if not self.getOtherGroup(test_name):
+                    toolbarName = test_name
+                i = i + 1
+
+        # Second, the toolbar preference group name
+        i = 1
+        while True:
+            new_group_name = "Custom_" + str(i)
+            if new_group_name not in self.Groups:
+                break
+            i = i + 1
+
+        custom_toolbar = FreeCAD.ParamGet(
+            f"User parameter:BaseApp/Workbench/{self.workbenchName}/Toolbar/" + new_group_name
+        )
+        custom_toolbar.SetString("Name", toolbarName)
+        custom_toolbar.SetBool("Active", True)
+        return custom_toolbar
+
+    @staticmethod
+    def getAllMacroCommandsWithActions():
+        """returns ["Std_Macro_1",etc] for all macros that have created actions.  These are not
+           necessarily all installed in toolbars."""
+        commands = FreeCADGui.Command.listAll()
+        macros = [com for com in commands if "Std_Macro_" in com]
+        return macros
+
+    def removeMacroAction(self, macroName):
+        """remove macro from Macros actions, will no longer have a Std_Macro_NNN associated with it
+            return True on success or False if nothing was removed """
+        commandName = self.getCommandName(macroName)
+        bSuccess = FreeCADGui.Command.removeCustomCommand(commandName)
+        self.MacrosGroup.RemGroup(commandName)
+        return bSuccess
+
+    def getMacroName(self, commandName):
+        """returns macro file name from commandName, e.g. Std_Macro_1 -> mymacro.py"""
+        grp = self.MacrosGroup.GetGroup(commandName)
+        return grp.GetString("Script", "")
+
+    def removeOrphans(self):
+            """removes the orphans from the current toolbar"""
+            if not self.Group:
+                FreeCAD.Console.PrintError(f"Invalid Group error for {self.tbName}:{self.wbName}\n")
+                return
+            orphans = self.getOrphansByCommandName()
+            for orphan in orphans:
+                self.Group.RemString(orphan)
+
+    def getOrphansByCommandName(self):
+        """orphans are macros that are still in the toolbar, but whose actions have been removed"""
+        FreeCADGui.Command.update()
+        commands = FreeCADGui.Command.listAll()
+        macros = [com for com in commands if "Std_Macro_" in com]
+        #macros is now a list in the form of ["Std_Macro_0", "Std_Macro_1", etc.]
+        if self.Group:
+            strings = self.Group.GetStrings()
+            installed = [string for string in strings if string != "Name"]
+        else:
+            return []
+        scripts = []
+        orphans = []
+        for inst in installed:
+            grp = self.MacrosGroup.GetGroup(inst)
+            script = grp.GetString("Script","")
+            if script:
+                scripts.append(script)
+            bOrphan = FreeCADGui.Command.get(inst) == None
+            if bOrphan:
+                orphans.append(inst)
+        return orphans
+
+
+    def getOrphans(self):
+        """orphans are macros that are still in the toolbar, but whose actions have been removed"""
+        FreeCADGui.Command.update()
+        commands = FreeCADGui.Command.listAll()
+        macros = [com for com in commands if "Std_Macro_" in com]
+        #macros is now a list in the form of ["Std_Macro_0", "Std_Macro_1", etc.]
+        if self.Group:
+            strings = self.Group.GetStrings()
+            installed = [string for string in strings if string != "Name"]
+        else:
+            return []
+        scripts = []
+        orphans = []
+        for inst in installed:
+            grp = self.MacrosGroup.GetGroup(inst)
+            script = grp.GetString("Script","")
+            if script:
+                scripts.append(script)
+            bOrphan = FreeCADGui.Command.get(inst) == None
+            if bOrphan:
+                orphans.append(script)
+
+        return orphans
+
+    def getInstalledMacros(self):
+        """returns the installed macros on this toolbar by filename in a list of strings"""
+        FreeCADGui.Command.update()
+        commands = FreeCADGui.Command.listAll()
+        macros = [com for com in commands if "Std_Macro_" in com]
+        #macros is now a list in the form of ["Std_Macro_0", "Std_Macro_1", etc.]
+        if self.Group:
+            strings = self.Group.GetStrings()
+            installed = [string for string in strings if string != "Name"]
+            #FreeCAD.Console.PrintMessage(f"(getInstalledMacros()): installed = {installed}\n")
+
+        else:
+            return []
+        scripts = []
+        for inst in installed:
+            grp = self.MacrosGroup.GetGroup(inst)
+            script = grp.GetString("Script","")
+            if script:
+                scripts.append(script)
+        #FreeCAD.Console.PrintMessage(f"scripts = {scripts}\n")
+        return scripts
+
+    @property
+    def MacrosGroup(self):
+        return FreeCAD.ParamGet("User parameter:BaseApp/Macro/Macros")
+
+    def addMacroAction(self, macroObject):
+        """creates a macro action and adds to Macros actions, but doesn't put on a toolbar
+           returns the new command name for this action, e.g. Std_Macro_12"""
+        command_name = FreeCADGui.Command.createCustomCommand(
+            macroObject.macroName,
+            macroObject.menuText,
+            macroObject.tooltip,
+            macroObject.whatsThis,
+            macroObject.statusText,
+            macroObject.pixmap,
+            macroObject.shortcut
+        )
+
+
+        #let's add it to the macros group, too, rather than require a restart
+        group = self.MacrosGroup.GetGroup(command_name)
+        group.SetString("Accel",macroObject.shortcut)
+        group.SetString("Menu",macroObject.menuText)
+        group.SetString("Pixmap",macroObject.pixmap)
+        group.SetString("Script",macroObject.macroName)
+        group.SetString("Statustip",macroObject.statusText)
+        group.SetString("Tooltip",macroObject.tooltip)
+        group.SetString("WhatsThis",macroObject.whatsThis)
+        group.SetBool("System",False)
+        return command_name
+
+    def addMacroToToolbar(self, macroObject) -> str:
+        """Creates macro action, adds macro to the toolbar, returns command name, e.g. Std_Macro1"""
+        commands = ToolbarManager.getAllMacroCommandsWithActions()
+        macroName = macroObject.macroName
+        for command in commands:
+            comName = self.getMacroName(command)
+            if comName == macroName:
+                self.removeMacroAction(macroName) #remove before adding so not to have duplicates
+        command_name = self.addMacroAction(macroObject)
+        self.Group.SetString(command_name, macroObject.menuText
+                                if macroObject.menuText else macroObject.macroName
+                                if macroObject.macroName else "FreeCAD")
+        ToolbarManager.refreshToolbar()
+        return command_name
+
+    def getCommandName(self,macroName):
+        """command name is in form of Std_Macro_9, returns None if macro is not already in Macros Action"""
+        return FreeCADGui.Command.findCustomCommand(macroName)
+
+    def uninstallMacroFromToolbar(self, macroName, bRemoveAction = False) -> bool:
+        """Removes macro from toolbar.  Also removes action if bRemoveAction = True,
+           which also removes the macro from any other toolbar
+           it might also be installed on"""
+        bSuccess = True
+        command = FreeCADGui.Command.findCustomCommand(macroName)
+        if not command:
+            FreeCAD.Console.PrintError(f"Command for {macroName} not found\n")
+            bSuccess = False
+        else:
+            FreeCAD.Console.PrintMessage(f"Command for {macroName} found: {command}\n")
+        self.Group.RemString(command) #even if no action we can still remove from toolbar, but still flag the error
+        if bRemoveAction:
+            FreeCADGui.Command.removeCustomCommand(command)
+        ToolbarManager.refreshToolbar()
+        return bSuccess
+
+
+__icon__ = """
+/* XPM */
+static char *dummy[]={
+"64 64 3 1",
+". c None",
+"# c #0000ff",
+"a c #ff0000",
+"................................................................",
+"................................................................",
+"................................................................",
+"...................#............................................",
+"..................###...........................................",
+".................#####..........................................",
+".................#####..........................................",
+".................#####..........................................",
+"................#####...........................................",
+"................#####...........................................",
+"................#####...........................................",
+"...............#####............................................",
+"...............#####............................................",
+"...............#####............................................",
+"..............#####...aaaaaaaa........................aaaaaaaaa.",
+"..............#####..aaaaaaaaaaa....................aaaaaaaaaaaa",
+"..............#####.aaaaaaaaaaaaa...................aaaaaaaaaaaa",
+".............#####...aaaaaaaaaaaa...................aaaaaaaaaaaa",
+".............#####....aaaaaaaaaaa..................aaaaaaaaaaaa.",
+".............#####........aaaaaaaa.................aaaaaaaa.....",
+"............#####.........aaaaaaaa.................aaaaaaaa.....",
+"............#####.........aaaaaaaa................aaaaaaaaa.....",
+".....#################....aaaaaaaaa...............aaaaaaaaa.....",
+"....###################...aaaaaaaaa...............aaaaaaaaa.....",
+"...#####################..aaaaaaaaa..............aaaaaaaaaa.....",
+"....###################...aaaaaaaaaa.............aaaaaaaaaa.....",
+".....#################....aaaaaaaaaa.............aaaaaaaaaa.....",
+".........######...........aaaaaaaaaa............aaaaaaaaaaa.....",
+".........######...........aaaaaaaaaaa...........aaaaaaaaaaa.....",
+"........######............aaaaaaaaaaa...........aaaaaaaaaaa.....",
+"........######............aaaaaaaaaaa..........aaaaaaaaaaaa.....",
+".......#######............aaaaaaaaaaaa.........aaaaaaaaaaaa.....",
+".......######.............aaaaaaaaaaaa.........aaaaaaaaaaaa.....",
+"......#######.............aaaaaaaaaaaa........aaaaaaaaaaaaa.....",
+"......#######.............aaaaaaaaaaaaa.......aaaaaaaaaaaaa.....",
+".....#######..............aaaaa.aaaaaaa.......aaaaa.aaaaaaa.....",
+".....#######..............aaaaa.aaaaaaa......aaaaaa.aaaaaaa.....",
+"....########..............aaaaa.aaaaaaaa.....aaaaaa.aaaaaaa.....",
+"...#########..............aaaaa..aaaaaaa.....aaaaa..aaaaaaa.....",
+"...########...............aaaaa..aaaaaaa....aaaaaa..aaaaaaa.....",
+"..#########.............#.aaaaa..aaaaaaaa...aaaaaa..aaaaaaa.....",
+".##########...........####aaaaa...aaaaaaa...aaaaa...aaaaaaa.....",
+".#########...........#####aaaaa...aaaaaaa..aaaaaa...aaaaaaa.....",
+"..########...........#####aaaaa...aaaaaaaa.aaaaaa...aaaaaaa.....",
+"...#######..........######aaaaa....aaaaaaa.aaaaa....aaaaaaa.....",
+"....#####..........#######aaaaa....aaaaaaaaaaaaa....aaaaaaa.....",
+"...######..........######.aaaaa....aaaaaaaaaaaaa....aaaaaaa.....",
+"...######.........######..aaaaa.....aaaaaaaaaaa.....aaaaaaa.....",
+"...#####..........######..aaaaa.....aaaaaaaaaaa.....aaaaaaa.....",
+"...#####.........######...aaaaa.....aaaaaaaaaaa.....aaaaaaa.....",
+"...#####.......#######....aaaaa......aaaaaaaaa......aaaaaaa.....",
+"...######....#########....aaaaa......aaaaaaaaa......aaaaaaa.....",
+"...##################.....aaaaa......aaaaaaaaa......aaaaaaa.....",
+"....################......aaaaa.......aaaaaaa.......aaaaaaa.....",
+".....#############....aaaaaaaaaaaa....aaaaaaa....aaaaaaaaaaaaaa.",
+"......##########.....aaaaaaaaaaaaaa...aaaaaaa...aaaaaaaaaaaaaaaa",
+"........######......aaaaaaaaaaaaaaaa...aaaaa...aaaaaaaaaaaaaaaaa",
+".....................aaaaaaaaaaaaaa....aaaaa....aaaaaaaaaaaaaaaa",
+"......................aaaaaaaaaaaa.......a.......aaaaaaaaaaaaaa.",
+"................................................................",
+"................................................................",
+"................................................................",
+"................................................................",
+"................................................................"};
+
+"""
+
+#UI_FILE created with QtCreator
+#rather than deal with distributing a separate ui file
+#I just copy/paste into here, save it to a temp file
+#load it in from the temp file, and then delete the temp file
+
+UI_FILE = '''<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>Dialog</class>
+ <widget class="QDialog" name="Dialog">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>643</width>
+    <height>677</height>
+   </rect>
+  </property>
+  <property name="sizePolicy">
+   <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+    <horstretch>0</horstretch>
+    <verstretch>0</verstretch>
+   </sizepolicy>
+  </property>
+  <property name="minimumSize">
+   <size>
+    <width>0</width>
+    <height>0</height>
+   </size>
+  </property>
+  <property name="maximumSize">
+   <size>
+    <width>99999</width>
+    <height>99999</height>
+   </size>
+  </property>
+  <property name="windowTitle">
+   <string/>
+  </property>
+  <property name="windowOpacity">
+   <double>1.000000000000000</double>
+  </property>
+  <property name="sizeGripEnabled">
+   <bool>false</bool>
+  </property>
+  <widget class="QWidget" name="verticalLayoutWidget">
+   <property name="geometry">
+    <rect>
+     <x>10</x>
+     <y>10</y>
+     <width>624</width>
+     <height>778</height>
+    </rect>
+   </property>
+   <layout class="QVBoxLayout" name="mainLayout">
+    <property name="sizeConstraint">
+     <enum>QLayout::SetDefaultConstraint</enum>
+    </property>
+    <item>
+     <layout class="QHBoxLayout" name="workbenchLayout">
+      <item>
+       <widget class="QLabel" name="workbenchLabel">
+        <property name="toolTip">
+         <string>Choose a workbench your toolbar will appear in.  If you choose Global it will appear in all of them.</string>
+        </property>
+        <property name="whatsThis">
+         <string/>
+        </property>
+        <property name="text">
+         <string>Workbench:</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QComboBox" name="ComboBoxWorkbench">
+        <property name="toolTip">
+         <string>Toolbar will appear in all workbenches</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QPushButton" name="activeGlobalButton">
+        <property name="toolTip">
+         <string>Selects active workbench or the Global workbench in the combo box.  Note: custom toolbars added to the Global workbench are available to all workbenches, but toolbars added to specific workbenches are only available when those workbenches are active.</string>
+        </property>
+        <property name="text">
+         <string>Active / Global</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <spacer name="horizontalSpacer_4">
+        <property name="orientation">
+         <enum>Qt::Horizontal</enum>
+        </property>
+        <property name="sizeHint" stdset="0">
+         <size>
+          <width>40</width>
+          <height>20</height>
+         </size>
+        </property>
+       </spacer>
+      </item>
+      <item>
+       <widget class="QPushButton" name="menuButton">
+        <property name="sizePolicy">
+         <sizepolicy hsizetype="Preferred" vsizetype="Preferred">
+          <horstretch>0</horstretch>
+          <verstretch>0</verstretch>
+         </sizepolicy>
+        </property>
+        <property name="minimumSize">
+         <size>
+          <width>0</width>
+          <height>0</height>
+         </size>
+        </property>
+        <property name="maximumSize">
+         <size>
+          <width>65</width>
+          <height>28</height>
+         </size>
+        </property>
+        <property name="toolTip">
+         <string>Menu</string>
+        </property>
+        <property name="text">
+         <string/>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </item>
+    <item>
+     <widget class="QFrame" name="frame_2">
+      <property name="frameShape">
+       <enum>QFrame::HLine</enum>
+      </property>
+      <property name="frameShadow">
+       <enum>QFrame::Plain</enum>
+      </property>
+      <property name="lineWidth">
+       <number>1</number>
+      </property>
+     </widget>
+    </item>
+    <item>
+     <layout class="QHBoxLayout" name="customToolbarLayout">
+      <item>
+       <layout class="QVBoxLayout" name="toolbarWidgetsLayout">
+        <item>
+         <layout class="QHBoxLayout" name="toolbarComboBoxLayout">
+          <property name="topMargin">
+           <number>0</number>
+          </property>
+          <property name="bottomMargin">
+           <number>0</number>
+          </property>
+          <item>
+           <widget class="QLabel" name="customToolbarLabel">
+            <property name="statusTip">
+             <string>You must create a custom toolbar for macros because you cannot edit the standard toolbars.</string>
+            </property>
+            <property name="text">
+             <string>Custom toolbar:</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QComboBox" name="ComboBoxCustomToolbar">
+            <property name="sizePolicy">
+             <sizepolicy hsizetype="Maximum" vsizetype="Fixed">
+              <horstretch>1</horstretch>
+              <verstretch>0</verstretch>
+             </sizepolicy>
+            </property>
+            <property name="minimumSize">
+             <size>
+              <width>300</width>
+              <height>0</height>
+             </size>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QCheckBox" name="activeCheckBox">
+            <property name="toolTip">
+             <string>Toggles visibility of toolbar.  You can disable the toolbar from here without deleting it.</string>
+            </property>
+            <property name="layoutDirection">
+             <enum>Qt::RightToLeft</enum>
+            </property>
+            <property name="text">
+             <string>Active</string>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </item>
+        <item>
+         <layout class="QHBoxLayout" name="installedInformationLayout">
+          <item>
+           <widget class="QLabel" name="installedLabel">
+            <property name="toolTip">
+             <string>These are the macros currently installed in the current toolbar, if any.  Only macros appear here, not other types of commands that the toolbar might have.</string>
+            </property>
+            <property name="text">
+             <string>Currently installed:</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QComboBox" name="ComboBoxInstalled"/>
+          </item>
+          <item>
+           <widget class="QPushButton" name="selectInstalledButton">
+            <property name="toolTip">
+             <string>Selects the currently installed macro for editing or removing</string>
+            </property>
+            <property name="text">
+             <string>Select</string>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <spacer name="horizontalSpacer_3">
+        <property name="orientation">
+         <enum>Qt::Horizontal</enum>
+        </property>
+        <property name="sizeHint" stdset="0">
+         <size>
+          <width>40</width>
+          <height>20</height>
+         </size>
+        </property>
+       </spacer>
+      </item>
+      <item>
+       <layout class="QVBoxLayout" name="customToolbarButtonLayout">
+        <item>
+         <widget class="QPushButton" name="newToolbarButton">
+          <property name="toolTip">
+           <string>Creates a new custom toolbar</string>
+          </property>
+          <property name="text">
+           <string>New</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="renameToolbarButton">
+          <property name="toolTip">
+           <string>Rename the current toolbar</string>
+          </property>
+          <property name="text">
+           <string>Rename</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="deleteToolbarButton">
+          <property name="toolTip">
+           <string>Delete the current toolbar</string>
+          </property>
+          <property name="text">
+           <string>Delete</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+     </layout>
+    </item>
+    <item>
+     <widget class="QFrame" name="frame">
+      <property name="frameShape">
+       <enum>QFrame::HLine</enum>
+      </property>
+      <property name="frameShadow">
+       <enum>QFrame::Plain</enum>
+      </property>
+      <property name="lineWidth">
+       <number>1</number>
+      </property>
+      <property name="midLineWidth">
+       <number>300</number>
+      </property>
+     </widget>
+    </item>
+    <item>
+     <layout class="QHBoxLayout" name="macroLayout">
+      <item>
+       <layout class="QVBoxLayout" name="macroNameAndFilterLayout">
+        <item>
+         <layout class="QHBoxLayout" name="filterLayout">
+          <item>
+           <widget class="QLabel" name="filterLabel">
+            <property name="text">
+             <string>Filter:</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLineEdit" name="LineEditFilter"/>
+          </item>
+          <item>
+           <spacer name="horizontalSpacer_6">
+            <property name="orientation">
+             <enum>Qt::Horizontal</enum>
+            </property>
+            <property name="sizeHint" stdset="0">
+             <size>
+              <width>40</width>
+              <height>20</height>
+             </size>
+            </property>
+           </spacer>
+          </item>
+         </layout>
+        </item>
+        <item>
+         <layout class="QHBoxLayout" name="macroNameLayout">
+          <item>
+           <widget class="QLabel" name="macroNameLabel">
+            <property name="toolTip">
+             <string>These are all the macro files in the user's macro directory.</string>
+            </property>
+            <property name="text">
+             <string>Macro name:</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QComboBox" name="ComboBoxMacroName"/>
+          </item>
+          <item>
+           <spacer name="horizontalSpacer_5">
+            <property name="orientation">
+             <enum>Qt::Horizontal</enum>
+            </property>
+            <property name="sizeHint" stdset="0">
+             <size>
+              <width>40</width>
+              <height>20</height>
+             </size>
+            </property>
+           </spacer>
+          </item>
+         </layout>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <layout class="QVBoxLayout" name="toolbarButtonsLayout">
+        <item>
+         <widget class="QPushButton" name="addMacroToToolbarButton">
+          <property name="toolTip">
+           <string>Adds or updates macro to toolbar if there is an active toolbar.
+Requirements: Menu text must not be empty
+Must be toolbar / workbench combination selected in the dialog.</string>
+          </property>
+          <property name="text">
+           <string>Add to toolbar</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="removeMacroFromToolbarButton">
+          <property name="toolTip">
+           <string>Remove the macro from the toolbar.  Does not delete the macro action.</string>
+          </property>
+          <property name="text">
+           <string>Remove macro</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+     </layout>
+    </item>
+    <item>
+     <layout class="QHBoxLayout" name="menuTextLayout">
+      <item>
+       <widget class="QLabel" name="menuTextLabel">
+        <property name="toolTip">
+         <string>This text (required) will be shown on the toolbar in lieu of a toolbar icon if one isn't selected.</string>
+        </property>
+        <property name="text">
+         <string>Menu text:</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QLineEdit" name="LineEditMenuText"/>
+      </item>
+     </layout>
+    </item>
+    <item>
+     <layout class="QHBoxLayout" name="tooltipLayout">
+      <item>
+       <widget class="QLabel" name="tooltipLabel">
+        <property name="statusTip">
+         <string>This text you're reading now.  It appears when the mouse pointer hovers over the toolbar icon or menu text.</string>
+        </property>
+        <property name="text">
+         <string>Tool tip:</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QLineEdit" name="LineEditToolTip"/>
+      </item>
+     </layout>
+    </item>
+    <item>
+     <layout class="QHBoxLayout" name="statusTextLayout">
+      <item>
+       <widget class="QLabel" name="statusTextLabel">
+        <property name="toolTip">
+         <string>Text will appear in the status bar when the mouse pointer is over the toolbar icon or menu text</string>
+        </property>
+        <property name="whatsThis">
+         <string/>
+        </property>
+        <property name="text">
+         <string>Status text:</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QLineEdit" name="LineEditStatusText"/>
+      </item>
+     </layout>
+    </item>
+    <item>
+     <layout class="QHBoxLayout" name="whatsThisLayout">
+      <item>
+       <widget class="QLabel" name="whatsThisLabel">
+        <property name="toolTip">
+         <string>Text displayed when the user clicks the ? help button and then clicks the toolbar icon or menu text</string>
+        </property>
+        <property name="whatsThis">
+         <string/>
+        </property>
+        <property name="text">
+         <string>What's this:</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QLineEdit" name="LineEditWhatsThis"/>
+      </item>
+     </layout>
+    </item>
+    <item>
+     <layout class="QHBoxLayout" name="shortcutLayout">
+      <item>
+       <widget class="QLabel" name="shortcutLabel">
+        <property name="toolTip">
+         <string>keyboard accelerator, e.g. Ctrl + D</string>
+        </property>
+        <property name="text">
+         <string>Shortcut:</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="Gui::AccelLineEdit" name="LineEditShortcut" native="true">
+        <property name="minimumSize">
+         <size>
+          <width>0</width>
+          <height>0</height>
+         </size>
+        </property>
+        <property name="toolTip">
+         <string>Gui::AccelLineEdit widget, select and press your desired shortcut key modifier key combination</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </item>
+    <item>
+     <widget class="QFrame" name="frame_3">
+      <property name="frameShape">
+       <enum>QFrame::HLine</enum>
+      </property>
+      <property name="frameShadow">
+       <enum>QFrame::Plain</enum>
+      </property>
+      <property name="lineWidth">
+       <number>1</number>
+      </property>
+     </widget>
+    </item>
+    <item>
+     <layout class="QHBoxLayout" name="pixmapLayout">
+      <item>
+       <widget class="QLabel" name="pixmapLabel">
+        <property name="toolTip">
+         <string>text for displaying the icon.  It is in some cases a name of a system icon, and in other cases the path to an icon file.</string>
+        </property>
+        <property name="text">
+         <string>Pixmap:</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QLineEdit" name="LineEditPixmap"/>
+      </item>
+      <item>
+       <widget class="QLabel" name="iconLabel">
+        <property name="minimumSize">
+         <size>
+          <width>64</width>
+          <height>64</height>
+         </size>
+        </property>
+        <property name="toolTip">
+         <string>Icon in Pixmap will be displayed here, or if null you get this macro's icon.</string>
+        </property>
+        <property name="text">
+         <string>icon</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <layout class="QVBoxLayout" name="pixmapWidgets">
+        <item>
+         <widget class="QPushButton" name="fromMacroButton">
+          <property name="toolTip">
+           <string>Attempt to extract icon information embedded in macro file as __icon__ or __xpm__ variable.</string>
+          </property>
+          <property name="text">
+           <string>From macro</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="selectIconFileButton">
+          <property name="toolTip">
+           <string>Browse local file system for an icon file.  Many image formats are supported.  SVG is scalable, and so is recommended.</string>
+          </property>
+          <property name="layoutDirection">
+           <enum>Qt::LeftToRight</enum>
+          </property>
+          <property name="text">
+           <string>Browse for icon</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="systemIconButton">
+          <property name="toolTip">
+           <string>This button has a right-click context menu</string>
+          </property>
+          <property name="text">
+           <string>System icon</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+     </layout>
+    </item>
+    <item>
+     <layout class="QHBoxLayout" name="extractionLayout">
+      <item>
+       <layout class="QVBoxLayout" name="extractionEditLayout">
+        <item>
+         <widget class="QLabel" name="extractedLabel">
+          <property name="toolTip">
+           <string>Some macros have icon information embedded within the source code.  Extract this information using the From macro button.  It will appear here in this QPlainText widget.  You can then save it as an XPM file if it's XPM data, or use the Download link button if it's a url.  Use as pixmap if it is a system icon name, for example &quot;applications-python&quot;</string>
+          </property>
+          <property name="text">
+           <string>Icon information extracted from macro file by using 'From macro' button:</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPlainTextEdit" name="PlainTextEditExtracted">
+          <property name="maximumSize">
+           <size>
+            <width>16777215</width>
+            <height>100</height>
+           </size>
+          </property>
+          <property name="toolTip">
+           <string>If this is a direct hyperlink to a file, you can download and save it with this button, which also sets it up as the Pixmap.</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <layout class="QVBoxLayout" name="extractionButtonsLayout">
+        <item>
+         <widget class="QPushButton" name="makeIconButton">
+          <property name="toolTip">
+           <string>Make a simple single-colored text-based XPM icon.</string>
+          </property>
+          <property name="text">
+           <string>Make icon</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="saveExtractedButton">
+          <property name="toolTip">
+           <string>If the text is an XPM definition, then you can use this button to save it as a local XPM file and set it up as the Pixmap text.</string>
+          </property>
+          <property name="text">
+           <string>Save XPM</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="useAsPixmapButton">
+          <property name="toolTip">
+           <string>If the text is a direct path to a local file or the name of a system icon, such as &quot;application-python&quot; you can use this button to set it up as the Pixmap text.</string>
+          </property>
+          <property name="text">
+           <string>Use as pixmap</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="openHyperlinkButton">
+          <property name="toolTip">
+           <string>If the text is a hyperlink to an online image file, you can use this button to download and store it to your local hard drive.</string>
+          </property>
+          <property name="text">
+           <string>Download link</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+     </layout>
+    </item>
+    <item>
+     <widget class="QFrame" name="frame_4">
+      <property name="frameShape">
+       <enum>QFrame::HLine</enum>
+      </property>
+      <property name="frameShadow">
+       <enum>QFrame::Plain</enum>
+      </property>
+     </widget>
+    </item>
+    <item>
+     <layout class="QHBoxLayout" name="statusLayout">
+      <property name="spacing">
+       <number>7</number>
+      </property>
+      <property name="sizeConstraint">
+       <enum>QLayout::SetMinimumSize</enum>
+      </property>
+      <property name="topMargin">
+       <number>0</number>
+      </property>
+      <item>
+       <widget class="QLabel" name="statusLabel">
+        <property name="toolTip">
+         <string>Various assorted status messages go here.  Black is normal message, Orange is warning, and Red indicates some kind of error.  Right-click context menu available for clearing messages.</string>
+        </property>
+        <property name="text">
+         <string>Messages go here.</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </item>
+    <item>
+     <widget class="QFrame" name="frame_5">
+      <property name="frameShape">
+       <enum>QFrame::HLine</enum>
+      </property>
+      <property name="frameShadow">
+       <enum>QFrame::Plain</enum>
+      </property>
+     </widget>
+    </item>
+    <item>
+     <layout class="QHBoxLayout" name="buttonLayout">
+      <item>
+       <spacer name="horizontalSpacer">
+        <property name="orientation">
+         <enum>Qt::Horizontal</enum>
+        </property>
+        <property name="sizeHint" stdset="0">
+         <size>
+          <width>40</width>
+          <height>20</height>
+         </size>
+        </property>
+       </spacer>
+      </item>
+      <item>
+       <widget class="QPushButton" name="closeButton">
+        <property name="toolTip">
+         <string>Closes the dialog.  Be sure you have added your macro using the Add to toolbar button because this Close button will not apply your changes.</string>
+        </property>
+        <property name="text">
+         <string>Close</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <spacer name="horizontalSpacer_2">
+        <property name="orientation">
+         <enum>Qt::Horizontal</enum>
+        </property>
+        <property name="sizeHint" stdset="0">
+         <size>
+          <width>40</width>
+          <height>20</height>
+         </size>
+        </property>
+       </spacer>
+      </item>
+     </layout>
+    </item>
+    <item>
+     <spacer name="verticalSpacer">
+      <property name="orientation">
+       <enum>Qt::Vertical</enum>
+      </property>
+      <property name="sizeHint" stdset="0">
+       <size>
+        <width>20</width>
+        <height>40</height>
+       </size>
+      </property>
+     </spacer>
+    </item>
+   </layout>
+  </widget>
+ </widget>
+ <customwidgets>
+  <customwidget>
+   <class>Gui::AccelLineEdit</class>
+   <extends>QWidget</extends>
+   <header>gui::accellineedit.h</header>
+  </customwidget>
+ </customwidgets>
+ <resources/>
+ <connections/>
+</ui>
+
+'''
+
+
+
+
+dlg = CustomToolbarEditor()
