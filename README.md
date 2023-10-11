@@ -106,6 +106,6 @@ Let's you browse for an icon file to use for this macro action.  The default fol
 #### System icon (button)
 Note: This button also has a context menu.  Use this to browse for system icons, icon files in icon folders you have configured, and (optionally) for icon files in the Mod folders where the addon workbenches are installed.  When you click one of the icons in the dialog that pops up, it closes the dialog and sets up the pixmap text field for you.  Here is a screenshot:
 
-<img src="MacroToolbarManager_scr2.png">
+<img src="MacroToolbarManager_scr02.png">
 
 
