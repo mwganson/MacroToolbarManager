@@ -108,4 +108,36 @@ Note: This button also has a context menu.  Use this to browse for system icons,
 
 <img src="MacroToolbarManager_scr02.png">
 
+All image files are parsed, but we only keep those that are 64 x 64 pixels are smaller for use as icons.
+
+#### Make icon (button)
+The macro provides a simple icon creator tool that you can use to make your own simple icons.  I used it, in fact, to make the xpm version of the icon for this macro, the blue t and the red M.  This functino makes use of openCV python package.  It comes bundled with FreeCAD, but if you self-compile you might not have it installed.  You can install with pip as pip install opencv-python.
+
+Here is a screenshot:
+
+<img src="MacroToolbarManager_scr03.png">
+
+The tool works by writing text to an image.  You control the text, the color, font, scale, and position with the various widgets in the tool.  You can load an icon to serve as the base image using the Base icon button.  That's how I made the icon with 2 different colors.  First I made the t in blue, and moved it to the left, then saved it as an xpm file.  Then I opened the tool again and selected that file as the base icon file, into which I added the red M.  You can scale by using your mouse's scroll wheel on the label image and you can position the text by dragging with the mouse.  Alternatively, use the spin boxes directly.  The base icon is rescaled to 64 x 64 when you add one, so you can use as large a file as you like, such as a screenshot.
+
+The text field supports using \n for a newline if you want more than a single line of text, but a maximum of only 2 lines are supported.  You can make a base image of the current icon, and then use it as the base icon to add more lines if you like.  Empty the text field, load in an image as Base icon, and export it as an XPM file to use this tool as an XPM converter that works well with FreeCAD.
+
+The font choices are limited to those provided by openCV.  There is no way, as far as I know, to add additional fonts.  If you add more text and lose the image, try scaling back until you find it, and then drag to the center and rescale back up.
+
+There are 2 check boxes that are self-explanatory.  All white and all black colors get set to transparency if these boxes are checked when you export to XPM.  When importing Base icons their transparent backgrounds are represented as black here, and when you start from scratch the background is represented as white here.  Checking and unchecking doesn't change the appearance of the icon in the editor, it just changes the XPM data upon export.
+
+#### Save XPM (button)
+Saves the contents in the Icon information text area as a text file.  You need to supply the .XPM extension.  If it's SVG data, then save in SVG format.  (But I don't think anybody puts SVG data into these __icon__ and __xpm__ fields, as far as I know.
+
+#### Use as pixmap (button)
+Uses the contents of the Icon information text area directly in the Pixmap field.
+
+#### Download link (button)
+Use this button to download the file in the url hyperlink in the Information text area, if such was extracted using the From macro button and placed into the text area.
+
+#### Status section
+There is a label above the Close button and below the Icon information field where messages are sometimes displayed.  Such messages are also echoed to the Report View, so if you think you missed something check there.  Messages in black text are normal messages, orange text means warnings, and red text indicates some sort of error occurred.
+
+
+## Changelog
+### v2023.10.11f -- initial version along with a few tweaks for the addon manager and for advising people who need to install opencv to make use of all the features.
 
