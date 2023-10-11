@@ -4,7 +4,7 @@
 #
 #Goal is to make it simpler and easier to manage custom
 #macros on custom toolbars
-__version__ = "0.2023.10.11d"
+__version__ = "0.2023.10.11e"
 
 LOAD_STRING = True #load UI from a string defined in this file if True,
                    #else from a separate ui file during development
@@ -236,11 +236,7 @@ class CustomToolbarEditor(QtGui.QWidget):
         class SimpleIconMaker(QtGui.QDialog):
             def __init__(self, cte):
                 super(SimpleIconMaker, self).__init__()
-                try:
-                    import cv2
-                except:
-                    cte.showMsg("This feature requires openCV package.  Install with pip install opencv-python", "error")
-                    return
+
                 self.setWindowTitle("Simple 64x64 Icon Maker")
                 self.cte = cte #cte = Custom Toolbar Editor instance
                 self.layout = QtGui.QGridLayout()
@@ -521,6 +517,12 @@ class CustomToolbarEditor(QtGui.QWidget):
                 else:
                     icon = FreeCADGui.getIcon(system_name)
                     button.setIcon(icon)
+
+        try:
+            import cv2
+        except:
+            cte.showMsg("This feature requires openCV package.  Install with pip install opencv-python", "error")
+            return
 
         dlg = SimpleIconMaker(self)
         dlg.exec_()
