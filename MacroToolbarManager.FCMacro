@@ -4,7 +4,7 @@
 #
 #Goal is to make it simpler and easier to manage custom
 #macros on custom toolbars
-__version__ = "0.2023.10.11e"
+__version__ = "0.2023.10.11f"
 
 LOAD_STRING = True #load UI from a string defined in this file if True,
                    #else from a separate ui file during development
@@ -521,7 +521,7 @@ class CustomToolbarEditor(QtGui.QWidget):
         try:
             import cv2
         except:
-            cte.showMsg("This feature requires openCV package.  Install with pip install opencv-python", "error")
+            self.showMsg("This feature requires openCV package.  Install with pip install opencv-python", "error")
             return
 
         dlg = SimpleIconMaker(self)
