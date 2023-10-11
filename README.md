@@ -89,4 +89,23 @@ Remove the macro from the toolbar.  Does not delete macro file.  Does not remove
 This is a list of all the macro files in your macros folder.  Note: the system macros folder is not supported by this macro.  The files listed are filtered by only those with .py, .FCMacro, or .fcmacro extensions.
 
 ### Icon section
+Here is where we have all the widgets related to working with the icons.
+
+#### Pixmap (line edit)
+This holds the pixmap text associated with this macro action.  It can be a couple different things.  It can be the full path to an icon file or it can be the name of a system icon.  An example of a system icon is "applications-python", which is the generic python icon used for the macro text editor built into FreeCAD.  When you use some of the buttons in this section the macro will update this pixmap text for you.
+
+#### Icon (label)
+There is a label after the Pixmap line edit between it and the buttons to the right side. If it contains a black X on a white background, that signifies the Pixmap field does not contain valid information to produce an icon.  If it has a different icon, then you should be good to go for putting it on the toolbar.
+
+#### From macro (button)
+Some macros have icon information embedded in their code in the form of string variables named __icon__ and __xpm__.  This button performs a scan of the actively selected macro in the Macro name combo box for this information, and the first one found gets extracted and put into the Icon information text area, the QPlainTextEdit widget below the Pixmap line edit.  The information might be a link to an online image, such as https://wiki.freecad.org/images/5/56/MacroToolbarManager_icon.svg, the svg macro file for this macro, or it might be the name of a system icon, or it might be the icon image in XPM notation.  It's up to you to figure out what it is and what to do with it.  If it's a url, then click the Download link button to download the file, save it in your icon folder, and setup the Pixmap text field to make use of it.  If it's the name of a system icon, then click Use as pixmap, or if it's in XPM format, click the Save XPM button to save it and setup the Pixmap text filed to make use of it.  (Note: the Make icon button will also fill up the Icon information text area with XPM data.)
+
+#### Browse for icon (button)
+Let's you browse for an icon file to use for this macro action.  The default folder it opens up in is the first icon folder you (might) have created already.  See System icons -> manage icon folders above for more details.  If no icon folders are defined, then it opens up in the macros folder.
+
+#### System icon (button)
+Note: This button also has a context menu.  Use this to browse for system icons, icon files in icon folders you have configured, and (optionally) for icon files in the Mod folders where the addon workbenches are installed.  When you click one of the icons in the dialog that pops up, it closes the dialog and sets up the pixmap text field for you.  Here is a screenshot:
+
+<img src="MacroToolbarManager_scr2.png">
+
 
