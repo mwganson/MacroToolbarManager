@@ -139,5 +139,6 @@ There is a label above the Close button and below the Icon information field whe
 
 
 ## Changelog
+### v2023.10.12 -- add border colors to text in icon maker dialog, scale to 256x256 instead of 200x200 for a better 4:1 pixel ratio
 ### v2023.10.11f -- initial version along with a few tweaks for the addon manager and for advising people who need to install opencv to make use of all the features.
 
