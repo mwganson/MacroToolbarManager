@@ -4,7 +4,7 @@
 #
 #Goal is to make it simpler and easier to manage custom
 #macros on custom toolbars
-__version__ = "0.2023.10.11f"
+__version__ = "0.2023.10.12"
 
 LOAD_STRING = True #load UI from a string defined in this file if True,
                    #else from a separate ui file during development
@@ -221,15 +221,17 @@ class CustomToolbarEditor(QtGui.QWidget):
         """make a simple single character icon"""
 
         class ColorDlg (QtGui.QColorDialog):
-            def __init__(self,title,flags):
+            def __init__(self,title,flags,textColor,borderColor):
                 QtGui.QColorDialog.__init__(self)
                 self.title = title
                 self.flags = flags
+                self.textColor = textColor
+                self.borderColor = borderColor
 
             def getClr(self, currentColor):
-                current = QtGui.QColor(currentColor[0]*255,currentColor[1]*255,currentColor[2]*255,currentColor[3]*255)
-                self.setCustomColor(0,QtGui.QColor.fromRgb(204,204,204,0)) # gray, default face color
-                self.setCustomColor(2,QtGui.QColor.fromRgb(0,0,0,0)) #black, default line and point color
+                current = QtGui.QColor(currentColor[0],currentColor[1],currentColor[2],0)
+                self.setCustomColor(0,QtGui.QColor.fromRgb(self.textColor[0],self.textColor[1],self.textColor[2],0))
+                self.setCustomColor(1,QtGui.QColor.fromRgb(self.borderColor[0],self.borderColor[1],self.borderColor[2],0))
                 clr = self.getColor(current,None,self.title, self.flags)
                 return clr
 
@@ -273,56 +275,75 @@ class CustomToolbarEditor(QtGui.QWidget):
                 self.colorButton.clicked.connect(self.onColorButtonClicked)
                 self.layout.addWidget(self.colorButton, 1, 1)
 
+                self.borderColorLabel = QtGui.QLabel("Border color:")
+                self.layout.addWidget(self.borderColorLabel, 2, 0)
+                self.borderColorButton = QtGui.QPushButton()
+                self.borderColorButton.setStyleSheet("background-color:darkred;")
+                self.borderColorButton.clicked.connect(self.onBorderColorButtonClicked)
+                self.layout.addWidget(self.borderColorButton, 2, 1)
+
+
                 self.scaleLabel = QtGui.QLabel("Scale:")
-                self.layout.addWidget(self.scaleLabel, 2, 0)
+                self.layout.addWidget(self.scaleLabel, 3, 0)
                 self.scaleSpinBox = QtGui.QDoubleSpinBox()
                 self.scaleSpinBox.valueChanged.connect(self.updateImage)
                 self.scaleSpinBox.setToolTip("Initial scale is small to ensure text fits in image")
                 self.scaleSpinBox.setRange(0.01,100)
                 self.scaleSpinBox.setSingleStep(0.1)
                 self.scaleSpinBox.setValue(.5)
-                self.layout.addWidget(self.scaleSpinBox, 2, 1)
+                self.layout.addWidget(self.scaleSpinBox, 3, 1)
 
                 self.thicknessLabel = QtGui.QLabel("Line thickness:")
-                self.layout.addWidget(self.thicknessLabel, 3, 0)
+                self.layout.addWidget(self.thicknessLabel, 4, 0)
                 self.thicknessSpinBox = QtGui.QSpinBox()
                 self.thicknessSpinBox.valueChanged.connect(self.updateImage)
                 self.thicknessSpinBox.setRange(1,100)
                 self.thicknessSpinBox.setSingleStep(1)
                 self.thicknessSpinBox.setValue(2)
-                self.layout.addWidget(self.thicknessSpinBox, 3, 1)
+                self.layout.addWidget(self.thicknessSpinBox, 4, 1)
+
+                self.borderThicknessLabel = QtGui.QLabel("Border thickness:")
+                self.layout.addWidget(self.borderThicknessLabel, 5, 0)
+                self.borderThicknessSpinBox = QtGui.QSpinBox()
+                self.borderThicknessSpinBox.setToolTip("0 for no border")
+                self.borderThicknessSpinBox.valueChanged.connect(self.updateImage)
+                self.borderThicknessSpinBox.setRange(0,100)
+                self.borderThicknessSpinBox.setSingleStep(1)
+                self.borderThicknessSpinBox.setValue(2)
+                self.layout.addWidget(self.borderThicknessSpinBox, 5, 1)
+
 
                 #for dragging in the image label
                 self.dragging = False
                 self.start_pos = None
 
                 self.xAdjustLabel = QtGui.QLabel("X adjust:")
-                self.layout.addWidget(self.xAdjustLabel, 4, 0)
+                self.layout.addWidget(self.xAdjustLabel, 6, 0)
                 self.xAdjustSpinBox = QtGui.QSpinBox()
                 self.xAdjustSpinBox.valueChanged.connect(self.updateImage)
                 self.xAdjustSpinBox.setRange(-100,100)
                 self.xAdjustSpinBox.setSingleStep(1)
                 self.xAdjustSpinBox.setValue(0)
-                self.layout.addWidget(self.xAdjustSpinBox, 4, 1)
+                self.layout.addWidget(self.xAdjustSpinBox, 6, 1)
 
                 self.yAdjustLabel = QtGui.QLabel("Y adjust:")
-                self.layout.addWidget(self.yAdjustLabel, 5, 0)
+                self.layout.addWidget(self.yAdjustLabel, 7, 0)
                 self.yAdjustSpinBox = QtGui.QSpinBox()
                 self.yAdjustSpinBox.valueChanged.connect(self.updateImage)
                 self.yAdjustSpinBox.setRange(-100,100)
                 self.yAdjustSpinBox.setSingleStep(1)
                 self.yAdjustSpinBox.setValue(0)
-                self.layout.addWidget(self.yAdjustSpinBox, 5, 1)
+                self.layout.addWidget(self.yAdjustSpinBox, 7, 1)
 
                 self.basePixmap = None
                 self.baseIconButton = QtGui.QPushButton("Base icon")
                 self.baseIconButton.clicked.connect(self.baseIconButtonClicked)
-                self.layout.addWidget(self.baseIconButton, 6,3, 1, 1)
+                self.layout.addWidget(self.baseIconButton, 8,3, 1, 1)
 
                 self.saveButton = QtGui.QPushButton("Extract XPM")
                 self.saveButton.clicked.connect(self.saveImage)
                 self.saveButton.setToolTip("Saves to XPM, sets up as Pixmap, closes dialog")
-                self.layout.addWidget(self.saveButton,6,4,1, 1)
+                self.layout.addWidget(self.saveButton,8,4,1, 1)
 
 
                 self.iconLabel = QtGui.QLabel()
@@ -331,7 +352,7 @@ class CustomToolbarEditor(QtGui.QWidget):
                 self.pixmap = None
                 self.updateImage()
 
-                self.layout.addWidget(self.iconLabel, 1, 3, 5, 3)
+                self.layout.addWidget(self.iconLabel, 1, 3, 7, 3)
 
                 self.whiteToTransparentCheckBox = QtGui.QCheckBox()
                 self.whiteToTransparentCheckBox.setText("White -> Transparent")
@@ -341,22 +362,28 @@ class CustomToolbarEditor(QtGui.QWidget):
                 self.blackToTransparentCheckBox.setToolTip("Applies only to XPM extraction")
                 self.whiteToTransparentCheckBox.setChecked(True)
                 self.blackToTransparentCheckBox.setChecked(True)
-                self.layout.addWidget(self.whiteToTransparentCheckBox, 6, 0)
-                self.layout.addWidget(self.blackToTransparentCheckBox, 6, 1)
+                self.layout.addWidget(self.whiteToTransparentCheckBox, 8, 0)
+                self.layout.addWidget(self.blackToTransparentCheckBox, 8, 1)
 
 
             def updateImage(self):
                 if not bool(hasattr(self, "textEdit") and hasattr(self,"scaleSpinBox") and \
                             hasattr(self, "thicknessSpinBox") and hasattr(self, "iconLabel") and \
-                            hasattr(self, "fontBox") and \
+                            hasattr(self, "fontBox") and hasattr(self, "borderThicknessSpinBox") and \
                             hasattr(self, "xAdjustSpinBox") and hasattr(self, "yAdjustSpinBox")):
                     return
-                self.pixmap = self.makeImage(self.textEdit.text() ,self.scaleSpinBox.value(), self.thicknessSpinBox.value(), self.getColor(), (255,255,255))
-                scaledPixmap = self.pixmap.scaled(200, 200, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+                self.pixmap = self.makeImage(self.textEdit.text() ,self.scaleSpinBox.value(), self.thicknessSpinBox.value(), self.getColor(), (255,255,255), self.getBorderColor(), self.borderThicknessSpinBox.value())
+                scaledPixmap = self.pixmap.scaled(256, 256, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
                 self.iconLabel.setPixmap(scaledPixmap)
 
             def getColor(self):
                 palette = self.colorButton.palette()
+                color = palette.color(palette.Background)
+                #print(f"color = {color.red(), color.green(), color.blue()}")
+                return (color.red(), color.green(), color.blue(), 0) #0 not used, but 4 values are expected
+
+            def getBorderColor(self):
+                palette = self.borderColorButton.palette()
                 color = palette.color(palette.Background)
                 #print(f"color = {color.red(), color.green(), color.blue()}")
                 return (color.red(), color.green(), color.blue(), 0) #0 not used, but 4 values are expected
@@ -379,8 +406,15 @@ class CustomToolbarEditor(QtGui.QWidget):
                     self.updateImage()
                     return
 
+            def onBorderColorButtonClicked(self):
+                colorDlg = ColorDlg("Simple Icon Maker", QtGui.QColorDialog.DontUseNativeDialog,self.getColor(), self.getBorderColor())
+                color = colorDlg.getClr(self.getBorderColor())
+                colorString = f'rgb({color.red()}, {color.green()}, {color.blue()})'
+                self.borderColorButton.setStyleSheet(f'background-color: {colorString};')
+                self.updateImage()
+
             def onColorButtonClicked(self):
-                colorDlg = ColorDlg("Simple Icon Maker", QtGui.QColorDialog.DontUseNativeDialog)
+                colorDlg = ColorDlg("Simple Icon Maker", QtGui.QColorDialog.DontUseNativeDialog, self.getColor(), self.getBorderColor())
                 color = colorDlg.getClr(self.getColor())
                 colorString = f'rgb({color.red()}, {color.green()}, {color.blue()})'
                 self.colorButton.setStyleSheet(f'background-color: {colorString};')
@@ -440,7 +474,7 @@ class CustomToolbarEditor(QtGui.QWidget):
                 return False
 
 
-            def makeImage(self, text, scale, thickness, color, bgColor):
+            def makeImage(self, text, scale, thickness, color, bgColor, borderColor, borderThickness):
                 """text is text to be used, scale is a float, thickness is an integer for
                    how thick in pixels the font will be, color is foreground color,
                    bgColor is background color.  Both colors are tuples in the form
@@ -488,12 +522,20 @@ class CustomToolbarEditor(QtGui.QWidget):
                 y = (image.shape[0] + text_size[1]) // 2 + self.yAdjustSpinBox.value()
 
                 if not "\\n" in text:
+                    if borderThickness:
+                        cv2.putText(image, text, (x, y), font, font_scale, borderColor, \
+                                font_thickness + borderThickness, lineType=cv2.LINE_AA)
                     cv2.putText(image, text, (x, y), font, font_scale, font_color, font_thickness)
                 else:
                     idx = text.find("\\n")
                     text1 = text[:idx]
                     text2 = text[idx+2:]
-                    print(f"text1,text2: {text1},{text2}")
+                    #print(f"text1,text2: {text1},{text2}")
+                    if borderThickness:
+                        cv2.putText(image, text1, (x, y), font, font_scale, borderColor, \
+                                            font_thickness + borderThickness, lineType=cv2.LINE_AA)
+                        cv2.putText(image, text2, (x, y + int(text_size[1] * 1.25)), font, font_scale, borderColor, \
+                                            font_thickness + borderThickness, lineType=cv2.LINE_AA)
                     cv2.putText(image, text1, (x, y), font, font_scale, font_color, font_thickness)
                     cv2.putText(image, text2, (x, y + int(text_size[1] *1.25)), font, font_scale, font_color, font_thickness)
                     if text.count("\\n") > 1:
