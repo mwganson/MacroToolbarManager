@@ -4,7 +4,7 @@
 #
 #Goal is to make it simpler and easier to manage custom
 #macros on custom toolbars
-__version__ = "0.2023.10.12"
+__version__ = "0.2023.10.13"
 
 LOAD_STRING = True #load UI from a string defined in this file if True,
                    #else from a separate ui file during development
@@ -37,8 +37,7 @@ class CustomToolbarEditor(QtGui.QWidget):
         super().__init__()
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
         self.setAttribute(QtCore.Qt.WA_WindowPropagation,True)
-
-
+        self.iconMakerTabWidget = None
         if not LOAD_STRING:
             self.form = FreeCADGui.PySideUic.loadUi(uiPath + "/custom_toolbar.ui")
         else:
@@ -79,6 +78,7 @@ class CustomToolbarEditor(QtGui.QWidget):
         self.form.show()
         winMinSize = self.form.minimumSizeHint()
         self.resize(winMinSize)
+
 
     def QIconFromXPMString(self, xpm_string):
         if "/*pixels*/" in xpm_string:
@@ -236,25 +236,39 @@ class CustomToolbarEditor(QtGui.QWidget):
                 return clr
 
         class SimpleIconMaker(QtGui.QDialog):
-            def __init__(self, cte):
+            def __init__(self, cte, basePixmap = None, layer=1, parentDlg = None, tabWidget = None):
                 super(SimpleIconMaker, self).__init__()
-
-                self.setWindowTitle("Simple 64x64 Icon Maker")
+                self.layer = layer
+                self.parentDlg = parentDlg
+                self.tabWidget = tabWidget
+                self.childDlg = None #if we spawn a new layer
+                self.closingAll = False
+                self.setWindowTitle(f"Simple 64x64 Icon Maker Layer({self.layer})")
+                #self.setWindowFlags(self.windowFlags() & ~QtCore.Qt.WindowCloseButtonHint)
                 self.cte = cte #cte = Custom Toolbar Editor instance
                 self.layout = QtGui.QGridLayout()
                 self.setLayout(self.layout)
-                self.textLabel = QtGui.QLabel("Text:")
-                self.layout.addWidget(self.textLabel, 0, 0)
+                self.textLabel = QtGui.QLabel("Element:")
+                self.layout.addWidget(self.textLabel, 2, 0, 1, 1)
                 self.textEdit = QtGui.QLineEdit()
                 self.textEdit.setText("A")
                 self.textEdit.textChanged.connect(self.updateImage)
-                self.textEdit.setToolTip("\\n supported (2 lines max)")
-                self.layout.addWidget(self.textEdit, 0, 1)
+                self.textEdit.setToolTip("\\n supported (2 lines max)" + \
+                                        "\nline(x1,y1,x2,y2)" + \
+                                        "\nthickness = -1 to fill closed objects, like circles and rectangles" + \
+                                        "\nrectangle(x1,y1,x2,y2)" + \
+                                        "\ncircle(x,y,r)" +\
+                                        "\nellipse(x,y,major,minor,angle)" +\
+                                        "\npolyline(x1,y1,x2,y2,x3,y3...) (variable argument count)" + \
+                                        "\npolygon(x,y,sides,radius,angle=0) (angle is optional, defaults to 0)" )
+
+                self.layout.addWidget(self.textEdit, 2, 1, 1, 3)
 
                 self.fontLabel = QtGui.QLabel("Font:")
-                self.layout.addWidget(self.fontLabel,0,2)
+                self.layout.addWidget(self.fontLabel, 1, 0, 1, 1)
 
                 self.fontBox = QtGui.QComboBox()
+                self.fontBox.setMinimumWidth(300)
                 self.fonts = {
                          "HERSHEY_COMPLEX":cv2.FONT_HERSHEY_COMPLEX,\
                          "HERSHEY_COMPLEX_SMALL":cv2.FONT_HERSHEY_COMPLEX_SMALL,\
@@ -266,51 +280,62 @@ class CustomToolbarEditor(QtGui.QWidget):
                          "ITALIC":cv2.FONT_ITALIC}
                 self.fontBox.currentIndexChanged.connect(self.updateImage)
                 self.fontBox.addItems(self.fonts.keys())
-                self.layout.addWidget(self.fontBox, 0, 3)
+                self.layout.addWidget(self.fontBox, 1, 1, 1, 3)
 
-                self.colorLabel = QtGui.QLabel("Text color:")
-                self.layout.addWidget(self.colorLabel, 1, 0)
+                self.colorLabel = QtGui.QLabel("Color:")
+                self.layout.addWidget(self.colorLabel, 3, 0, 1, 1)
                 self.colorButton = QtGui.QPushButton()
                 self.colorButton.setStyleSheet("background-color:red;")
                 self.colorButton.clicked.connect(self.onColorButtonClicked)
-                self.layout.addWidget(self.colorButton, 1, 1)
+                self.layout.addWidget(self.colorButton, 3, 1, 1, 1)
 
-                self.borderColorLabel = QtGui.QLabel("Border color:")
-                self.layout.addWidget(self.borderColorLabel, 2, 0)
+                self.borderColorLabel = QtGui.QLabel("Border:")
+                self.layout.addWidget(self.borderColorLabel, 3, 2, 1, 1)
                 self.borderColorButton = QtGui.QPushButton()
                 self.borderColorButton.setStyleSheet("background-color:darkred;")
                 self.borderColorButton.clicked.connect(self.onBorderColorButtonClicked)
-                self.layout.addWidget(self.borderColorButton, 2, 1)
+                self.layout.addWidget(self.borderColorButton, 3, 3, 1, 1)
 
 
                 self.scaleLabel = QtGui.QLabel("Scale:")
-                self.layout.addWidget(self.scaleLabel, 3, 0)
+                self.layout.addWidget(self.scaleLabel, 5, 0, 1, 1)
                 self.scaleSpinBox = QtGui.QDoubleSpinBox()
                 self.scaleSpinBox.valueChanged.connect(self.updateImage)
-                self.scaleSpinBox.setToolTip("Initial scale is small to ensure text fits in image")
+                self.scaleSpinBox.setToolTip("Only applies to text elements, scale down if your text disappears off screen")
                 self.scaleSpinBox.setRange(0.01,100)
                 self.scaleSpinBox.setSingleStep(0.1)
-                self.scaleSpinBox.setValue(.5)
-                self.layout.addWidget(self.scaleSpinBox, 3, 1)
+                self.scaleSpinBox.setValue(1)
+                self.layout.addWidget(self.scaleSpinBox, 5, 1, 1, 1)
 
-                self.thicknessLabel = QtGui.QLabel("Line thickness:")
-                self.layout.addWidget(self.thicknessLabel, 4, 0)
+                self.angleAdjustLabel = QtGui.QLabel("Angle adjust:")
+                self.layout.addWidget(self.angleAdjustLabel, 5, 2, 1, 1)
+                self.angleAdjustSpinBox = QtGui.QSpinBox()
+                self.angleAdjustSpinBox.setToolTip("only works with ellipses and polygons")
+                self.angleAdjustSpinBox.valueChanged.connect(self.updateImage)
+                self.angleAdjustSpinBox.setRange(-720,720)
+                self.angleAdjustSpinBox.setSingleStep(1)
+                self.angleAdjustSpinBox.setValue(0)
+                self.layout.addWidget(self.angleAdjustSpinBox, 5, 3, 1, 1)
+
+                self.thicknessLabel = QtGui.QLabel("Thickness:")
+                self.layout.addWidget(self.thicknessLabel, 4, 0, 1, 1)
                 self.thicknessSpinBox = QtGui.QSpinBox()
+                self.thicknessSpinBox.setToolTip("-1 to fill closed shapes like circles, else 0 or 1 will be interpreted as 1 for text")
                 self.thicknessSpinBox.valueChanged.connect(self.updateImage)
-                self.thicknessSpinBox.setRange(1,100)
+                self.thicknessSpinBox.setRange(-1,100)
                 self.thicknessSpinBox.setSingleStep(1)
                 self.thicknessSpinBox.setValue(2)
-                self.layout.addWidget(self.thicknessSpinBox, 4, 1)
+                self.layout.addWidget(self.thicknessSpinBox, 4, 1, 1, 1)
 
-                self.borderThicknessLabel = QtGui.QLabel("Border thickness:")
-                self.layout.addWidget(self.borderThicknessLabel, 5, 0)
+                self.borderThicknessLabel = QtGui.QLabel("Border:")
+                self.layout.addWidget(self.borderThicknessLabel, 4, 2, 1, 1)
                 self.borderThicknessSpinBox = QtGui.QSpinBox()
                 self.borderThicknessSpinBox.setToolTip("0 for no border")
                 self.borderThicknessSpinBox.valueChanged.connect(self.updateImage)
                 self.borderThicknessSpinBox.setRange(0,100)
                 self.borderThicknessSpinBox.setSingleStep(1)
                 self.borderThicknessSpinBox.setValue(2)
-                self.layout.addWidget(self.borderThicknessSpinBox, 5, 1)
+                self.layout.addWidget(self.borderThicknessSpinBox, 4, 3, 1, 1)
 
 
                 #for dragging in the image label
@@ -318,96 +343,277 @@ class CustomToolbarEditor(QtGui.QWidget):
                 self.start_pos = None
 
                 self.xAdjustLabel = QtGui.QLabel("X adjust:")
-                self.layout.addWidget(self.xAdjustLabel, 6, 0)
+                self.layout.addWidget(self.xAdjustLabel, 6, 0, 1, 1)
                 self.xAdjustSpinBox = QtGui.QSpinBox()
                 self.xAdjustSpinBox.valueChanged.connect(self.updateImage)
                 self.xAdjustSpinBox.setRange(-100,100)
                 self.xAdjustSpinBox.setSingleStep(1)
                 self.xAdjustSpinBox.setValue(0)
-                self.layout.addWidget(self.xAdjustSpinBox, 6, 1)
+                self.layout.addWidget(self.xAdjustSpinBox, 6, 1, 1, 1)
 
                 self.yAdjustLabel = QtGui.QLabel("Y adjust:")
-                self.layout.addWidget(self.yAdjustLabel, 7, 0)
+                self.layout.addWidget(self.yAdjustLabel, 6, 2, 1, 1)
                 self.yAdjustSpinBox = QtGui.QSpinBox()
                 self.yAdjustSpinBox.valueChanged.connect(self.updateImage)
                 self.yAdjustSpinBox.setRange(-100,100)
                 self.yAdjustSpinBox.setSingleStep(1)
                 self.yAdjustSpinBox.setValue(0)
-                self.layout.addWidget(self.yAdjustSpinBox, 7, 1)
+                self.layout.addWidget(self.yAdjustSpinBox, 6, 3, 1, 1)
 
-                self.basePixmap = None
-                self.baseIconButton = QtGui.QPushButton("Base icon")
-                self.baseIconButton.clicked.connect(self.baseIconButtonClicked)
-                self.layout.addWidget(self.baseIconButton, 8,3, 1, 1)
 
-                self.saveButton = QtGui.QPushButton("Extract XPM")
+                self.addElementLabel = QtGui.QLabel("Add element:")
+                self.layout.addWidget(self.addElementLabel, 0, 0, 1, 1)
+                self.addElementComboBox = QtGui.QComboBox()
+                self.addElementComboBox.currentIndexChanged.connect(self.onAddElementComboBoxCurrentIndexChanged)
+                self.addElementComboBox.setEnabled(False)
+                self.elements = {"Clear Element field to enable":("",""), \
+                                "text":("A","Just enter the text you want displayed"), \
+                                "circle":("circle(0,0,10)","circle(center_x, center_y, radius)"),\
+                                "ellipse":("ellipse(0,0,10,15,45)","ellipse(center_x, center_y, major_radius, minor_radius, angle)"), \
+                                "rectangle":("rectangle(0,0,63,63)","rectangle(top_left_x, top_left_y, bottom_right_x, bottom_right_y)"), \
+                                "polygon":("polygon(0,0,5,10,45)","polygon(center_x, center_y, number_sides, circumradius, angle)"), \
+                                "polyline":("polyline(0,0,25,0,42,42,0,37,0,0)","polyline(x1,y1, x2,y2, ... end with x1,y1 to close)"),\
+                                "line":("line(0,0,50,0)","line(x1,y1, x2,y2)")}
+                self.addElementComboBox.addItems(sorted(self.elements.keys()))
+                self.layout.addWidget(self.addElementComboBox, 0, 1, 1, 3)
+
+                self.basePixmap = basePixmap
+                self.loadBaseButton = QtGui.QPushButton("Load base")
+                self.loadBaseButton.setToolTip("Load an image or select an icon to serve as the base for your icon")
+                self.loadBaseButton.clicked.connect(self.loadBaseButtonClicked)
+                self.layout.addWidget(self.loadBaseButton, 9, 5 , 1, 1)
+
+                self.addLayerButton = QtGui.QPushButton("Add layer")
+                self.addLayerButton.setToolTip("Add another layer.  Each layer builds on top of the lower layers, one feature per layer")
+                self.addLayerButton.clicked.connect(self.onAddLayerButtonClicked)
+                self.layout.addWidget(self.addLayerButton, 9, 4, 1, 1)
+
+                self.saveButton = QtGui.QPushButton("Export XPM")
                 self.saveButton.clicked.connect(self.saveImage)
-                self.saveButton.setToolTip("Saves to XPM, sets up as Pixmap, closes dialog")
-                self.layout.addWidget(self.saveButton,8,4,1, 1)
+                self.saveButton.setToolTip("Puts the XPM string for this icon into the plain text area in the main dialog.")
+                self.layout.addWidget(self.saveButton, 10, 4, 1, 1)
 
+                self.closeTabButton = QtGui.QPushButton("Close tab")
+                self.closeTabButton.setToolTip("Closes this layer.  (only top layer can be closed)")
+                self.closeTabButton.clicked.connect(self.onCloseTabButtonClicked)
+                self.layout.addWidget(self.closeTabButton, 10, 6, 1, 1)
+
+                self.closeAllButton = QtGui.QPushButton("Close all layers")
+                self.closeAllButton.clicked.connect(self.closeAll)
+                self.closeAllButton.setToolTip("Closes this and all other layers")
+                self.layout.addWidget(self.closeAllButton, 10, 5, 1, 1)
+
+                self.flashButton = QtGui.QPushButton("Flash")
+                self.flashButton.setToolTip("Flashes the element in the active layer")
+                self.flashButton.clicked.connect(self.onFlashButtonClicked)
+                self.layout.addWidget(self.flashButton, 9, 6, 1, 1)
 
                 self.iconLabel = QtGui.QLabel()
                 self.iconLabel.installEventFilter(self)
                 self.iconLabel.setObjectName("iconLabel")
+                self.iconLabel.setStyleSheet("background-color: lightgray;")
+                self.iconLabel.setAlignment(QtCore.Qt.AlignCenter)
                 self.pixmap = None
                 self.updateImage()
 
-                self.layout.addWidget(self.iconLabel, 1, 3, 7, 3)
+                self.layout.addWidget(self.iconLabel, 0, 4, 9, 3)
 
                 self.whiteToTransparentCheckBox = QtGui.QCheckBox()
                 self.whiteToTransparentCheckBox.setText("White -> Transparent")
-                self.whiteToTransparentCheckBox.setToolTip("Applies only to XPM extraction")
+                self.whiteToTransparentCheckBox.setToolTip("Applied when the XPM string is exported")
                 self.blackToTransparentCheckBox = QtGui.QCheckBox()
                 self.blackToTransparentCheckBox.setText("Black -> Transparent")
-                self.blackToTransparentCheckBox.setToolTip("Applies only to XPM extraction")
+                self.blackToTransparentCheckBox.setToolTip("Applied when the XPM string is exported")
                 self.whiteToTransparentCheckBox.setChecked(True)
                 self.blackToTransparentCheckBox.setChecked(True)
-                self.layout.addWidget(self.whiteToTransparentCheckBox, 8, 0)
-                self.layout.addWidget(self.blackToTransparentCheckBox, 8, 1)
+                self.layout.addWidget(self.whiteToTransparentCheckBox, 9, 0, 1, 2)
+                self.layout.addWidget(self.blackToTransparentCheckBox, 10, 0, 1, 2)
+
+            def onFlashButtonClicked(self):
+                """flash the current layer's element off and on a few times"""
+                backup = self.textEdit.text()
+                flashes = 3
+                sleepTime = .125
+                for ii in range(flashes):
+                    self.textEdit.setText("")
+                    time.sleep(sleepTime)
+                    FreeCADGui.updateGui()
+                    self.textEdit.setText(backup)
+                    time.sleep(sleepTime)
+                    FreeCADGui.updateGui()
+
+
+            def onAddElementComboBoxCurrentIndexChanged(self):
+                if self.addElementComboBox.currentIndex() == 0:
+                    return
+                currentValue = self.addElementComboBox.currentText()
+                elementToAdd = self.elements[currentValue]
+                self.textEdit.setText(elementToAdd[0])
+                self.cte.showMsg(elementToAdd[1])
+                self.addElementComboBox.setCurrentIndex(0)
+                self.updateImage()
 
 
             def updateImage(self):
                 if not bool(hasattr(self, "textEdit") and hasattr(self,"scaleSpinBox") and \
                             hasattr(self, "thicknessSpinBox") and hasattr(self, "iconLabel") and \
                             hasattr(self, "fontBox") and hasattr(self, "borderThicknessSpinBox") and \
-                            hasattr(self, "xAdjustSpinBox") and hasattr(self, "yAdjustSpinBox")):
+                            hasattr(self, "xAdjustSpinBox") and hasattr(self, "yAdjustSpinBox") and \
+                            hasattr(self, "addElementComboBox") and hasattr(self, "angleAdjustSpinBox")):
                     return
-                self.pixmap = self.makeImage(self.textEdit.text() ,self.scaleSpinBox.value(), self.thicknessSpinBox.value(), self.getColor(), (255,255,255), self.getBorderColor(), self.borderThicknessSpinBox.value())
+                if not self.textEdit.text():
+                    self.addElementComboBox.setEnabled(True)
+                else:
+                    self.addElementComboBox.setEnabled(False)
+                self.pixmap = self.makeImage(self.textEdit.text() ,self.scaleSpinBox.value(), \
+                              self.thicknessSpinBox.value(), self.getColor(), (255,255,255), \
+                              self.getBorderColor(), self.borderThicknessSpinBox.value())
                 scaledPixmap = self.pixmap.scaled(256, 256, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
                 self.iconLabel.setPixmap(scaledPixmap)
 
+                #we have a child dialog if there is another layer following this one
+                #inform next layer it needs to update, ensure this layer is that layer's base image
+                if self.childDlg:
+                    self.childDlg.basePixmap = self.pixmap
+                    self.childDlg.updateImage()
+
             def getColor(self):
+                """gets the current color of the color button, returns as (r,g,b,a) each a value from 0 to 255"""
                 palette = self.colorButton.palette()
                 color = palette.color(palette.Background)
                 #print(f"color = {color.red(), color.green(), color.blue()}")
                 return (color.red(), color.green(), color.blue(), 0) #0 not used, but 4 values are expected
 
             def getBorderColor(self):
+                """gets the current color of the border color button, returns as (r,g,b,a) each from 0 to 255"""
                 palette = self.borderColorButton.palette()
                 color = palette.color(palette.Background)
                 #print(f"color = {color.red(), color.green(), color.blue()}")
                 return (color.red(), color.green(), color.blue(), 0) #0 not used, but 4 values are expected
 
-            def baseIconButtonClicked(self):
-                iconFolders = self.cte.getIconFolders()
-                if iconFolders:
-                    default_folder = iconFolders[0]
+            def onAddLayerButtonClicked(self):
+                """Opens a new tab with the current image as a base for the new image"""
+                self.childDlg = SimpleIconMaker(self.cte, self.pixmap, layer=self.layer+1, parentDlg = self, tabWidget = self.tabWidget)
+                #disable adding new layers since now there exists a layer atop this layer
+                self.addLayerButton.setEnabled(False)
+                #only layer1 can use a base image, or else it would cover previous layers
+                self.childDlg.loadBaseButton.setEnabled(False)
+                #disable closing this layer if there is another layer on top of it, user can empty Element, if desired
+                self.closeTabButton.setEnabled(False)
+                self.tabWidget.addTab(self.childDlg, f"Layer{self.layer+1}")
+                self.tabWidget.setCurrentWidget(self.childDlg)
+                self.childDlg.show()
+                return
+
+            def onCloseTabButtonClicked(self):
+                self.tabWidget.removeTab(self.layer-1)
+                #top layer's parent will be None since there is no layer below it
+                if hasattr(self.parentDlg,"addLayerButton"):
+                    #we're closing this top layer, so re-enable the next lower level's add layer button
+                    self.parentDlg.addLayerButton.setEnabled(True)
                 else:
-                    default_folder = FreeCAD.getUserMacroDir(True)
-                dlg = QtGui.QFileDialog(self, "Open image file, or cancel to clear out base icon", default_folder, \
-                                  "Image Files (*.png *.jpg *.jpeg *.bmp *.gif *.svg *.webp *.xpm *.XPM);;All Files (*)")
-                dlg.setFileMode(QtGui.QFileDialog.ExistingFile)
-                if dlg.exec_():
-                    filename = dlg.selectedFiles()[0]
-                    self.basePixmap = QtGui.QPixmap(filename)
+                    self.closeAll() #closing layer1, so close everything.
+                self.close()
+
+            def closeAll(self):
+                """closes and deletes all layers and the tab widget"""
+                self.closingAll = True
+                widgets = []
+                p = self.parentDlg
+                while p:
+                    widgets.append(p)
+                    p = p.parentDlg
+                child = self.childDlg
+                while child:
+                    widgets.append(child)
+                    child = child.childDlg
+                for widget in widgets:
+                    widget.closingAll = True
+                    #print(f"Deleting layer: {widget.layer}")
+                    widget.close()
+                    widget.deleteLater
+                self.tabWidget.close()
+                self.tabWidget.deleteLater()
+                self.close()
+                self.deleteLater()
+
+            def closeEvent(self, event):
+                """handle close event"""
+                #some of this is unnecessary, but it works, so we leave it in just
+                #in case we want to allow closing interior layers in the future
+                #(currently, only the top layer can be closed)
+                #this logic removes the tab being closed from the image chain
+                #by setting it's own parent's childDlg property to point to its
+                #own childDlg and it's child's parentDlg to its own parentDlg
+                if not self.closingAll:
+                    if self.parentDlg:
+                        self.parentDlg.closeTabButton.setEnabled(True)
+                        if self.childDlg:
+                            self.parentDlg.childDlg = self.childDlg
+                            self.childDlg.parentDlg = self.parentDlg
+                            self.parentDlg.updateImage()
+                            self.childDlg.updateImage()
+                            if self.layer != 1:
+                                self.parentDlg.closeTabButton.setEnabled(True)
+                            self.parentDlg.addLayerButton.setEnabled(True)
+                            #print(f"Deleting layer: {self.layer}")
+                            self.deleteLater()
+                    #since not all tabs are closing we ignore the
+                    #event as we have already deleted the layer
+                    event.ignore()
+                else:
+                    #everything is closing, so propage the event up the chain
+                    super().closeEvent(event)
+
+            def loadBaseButtonClicked(self):
+                """Now Load base button, loads an image file to use as base icon"""
+
+                parseMod = self.cte.getBool("ParseModFolder",False)
+                w = SystemIconSelector(parseModFolder = parseMod, cte=self.cte, bShowBrowseButton = True, bShowStyleIcons = True)
+                w.setModal(True)
+                w.exec_()
+                result = w.icon_text
+                bUseStyle = w.bUseStyle
+                bLoadFromDisk = w.bLoadFromDisk
+                w.deleteLater()
+                if result and bUseStyle:
+                    pixmapi = getattr(QtGui.QStyle, result)
+                    icon = self.style().standardIcon(pixmapi)
+                    self.basePixmap = icon.pixmap(64,64)
                     self.updateImage()
+                    return
+                elif result and not bUseStyle:
+                    icon = QtGui.QIcon(FreeCADGui.getIcon(result))
+                    self.basePixmap = icon.pixmap(64,64)
+                    self.updateImage()
+
+                elif bLoadFromDisk:
+                    iconFolders = self.cte.getIconFolders()
+                    if iconFolders:
+                        default_folder = iconFolders[0]
+                    else:
+                        default_folder = FreeCAD.getUserMacroDir(True)
+                    dlg = QtGui.QFileDialog(self, "Open image file, or cancel to clear out base icon", default_folder, \
+                                    "Image Files (*.png *.jpg *.jpeg *.bmp *.gif *.svg *.webp *.xpm *.XPM);;All Files (*)")
+                    dlg.setFileMode(QtGui.QFileDialog.ExistingFile)
+                    if dlg.exec_():
+                        filename = dlg.selectedFiles()[0]
+                        self.basePixmap = QtGui.QPixmap(filename)
+                        self.updateImage()
+                    else:
+                        self.basePixmap = None
+                        self.updateImage()
+                        return
                 else:
                     self.basePixmap = None
                     self.updateImage()
                     return
 
             def onBorderColorButtonClicked(self):
-                colorDlg = ColorDlg("Simple Icon Maker", QtGui.QColorDialog.DontUseNativeDialog,self.getColor(), self.getBorderColor())
+                """handle case where user wants to change the border color"""
+                #the 2 color arguments at the end are to tell the dialog to add as custom colors, the current color and border color
+                #then we call getClr(current color), getClr() makes use of those last 2 arguments to add them as custom colors
+                colorDlg = ColorDlg("Simple Icon Maker", QtGui.QColorDialog.DontUseNativeDialog, self.getColor(), self.getBorderColor())
                 color = colorDlg.getClr(self.getBorderColor())
                 colorString = f'rgb({color.red()}, {color.green()}, {color.blue()})'
                 self.borderColorButton.setStyleSheet(f'background-color: {colorString};')
@@ -421,9 +627,8 @@ class CustomToolbarEditor(QtGui.QWidget):
                 self.updateImage()
 
             def saveImage(self):
-
+                """converts image to an xpm string, puts into the extracted plain text edit"""
                 image = self.pixmap.toImage()
-                #image.save("c:/users/mwganson/Downloads/pathtosave.xpm", "XPM")
                 buffer = QtCore.QBuffer()
                 buffer.open(QtCore.QBuffer.ReadWrite)
                 image.save(buffer, "XPM")
@@ -439,10 +644,14 @@ class CustomToolbarEditor(QtGui.QWidget):
                     xpm_data_string = xpm_data_string.replace("#000000","None")
                 self.cte.form.PlainTextEditExtracted.setPlainText(xpm_data_string)
                 self.cte.form.saveExtractedButton.setEnabled(True)
-                self.close()
                 #FreeCAD.Console.PrintMessage(f"xpm = {xpm_data_string}\n")
 
             def eventFilter(self, obj, event):
+                """installed to image label and to tab widget
+                   for the image label we use this for scaling and dragging
+                   the curent layer.  For the tab widget we detect when it is
+                   being closed and delete all the layer dialogs in that case
+                """
                 if obj == self.iconLabel and event.type() == event.Wheel:
                     # Adjust the scale factor based on the mouse wheel
                     angle = event.angleDelta().y()
@@ -471,7 +680,64 @@ class CustomToolbarEditor(QtGui.QWidget):
                             self.start_pos = None
                             self.iconLabel.setCursor(QtGui.QCursor(QtCore.Qt.ArrowCursor))
                             return True  # Consume the event
-                return False
+                if obj == self.tabWidget and event.type() == QtCore.QEvent.Type.Close:
+                    if not self.parentDlg: #this is layer 1
+                        self.closeAll()
+                        return True
+                # elif obj == self.tabWidget and event.type() == QtCore.QEvent.Type.LayoutRequest:
+                #     #print(f"event.Type = {event.type()}")
+                #     #user changed tabs
+                #     self.onFlashButtonClicked()
+                #     return True
+                return super().eventFilter(obj, event)
+
+            def polygon_to_polyline(self, polygon_str):
+                """ these are regular polygons
+
+                   polygon_str should be of the form:
+                   polygon(centerX, centerY, numer of sides, circumradius, angle = 0)
+                   the angle is option, if left out we do 0 degrees
+
+                   Here, we check if this is a valid polygon string, and if so we convert
+                   it to a polyline string and return this new string, since we already had
+                   good working code to handle polyline input, else return None
+                   """
+                # Extract polygon parameters from the input string
+                polygon_str = polygon_str.replace(" ", "").lower()
+                match = re.search(r"polygon\((\d+),(\d+),(\d+),(\d+)(?:,(\d+))?\)", polygon_str)
+
+                if match:
+                    center_x = int(match.group(1))
+                    center_y = int(match.group(2))
+                    num_sides = int(match.group(3))
+                    circumradius = int(round(float(match.group(4)) * self.scaleSpinBox.value()))
+                    #angle is optional argument, defaulting to 0 if left out
+                    angle = int(match.group(5)) if match.group(5) is not None else 0
+                    angleAdj = self.angleAdjustSpinBox.value()
+
+                    # Calculate the vertices of the polygon
+                    vertices = []
+                    for i in range(num_sides):
+                        theta = 2 * np.pi * i / num_sides + np.radians(angle + angleAdj)
+                        x = center_x + circumradius * np.cos(theta)
+                        y = center_y + circumradius * np.sin(theta)
+                        vertices.append((x, y))
+
+                    # Convert vertices into a polyline string
+                    polyline_str = "polyline("
+                    for vertex in vertices:
+                        x, y = int(round(vertex[0])), int(round(vertex[1]))
+                        polyline_str += f"{x},{y},"
+                    if vertices[0] != vertices[-1]:
+                        # If not closed, add the first vertex again to close the polyline
+                        x, y = int(round(vertices[0][0])), int(round(vertices[0][1]))
+                        polyline_str += f"{x},{y})"
+                    else:
+                        polyline_str = polyline_str[:-1] + ")"
+
+                    return polyline_str
+                else:
+                    return None
 
 
             def makeImage(self, text, scale, thickness, color, bgColor, borderColor, borderThickness):
@@ -479,12 +745,13 @@ class CustomToolbarEditor(QtGui.QWidget):
                    how thick in pixels the font will be, color is foreground color,
                    bgColor is background color.  Both colors are tuples in the form
                    of (0-255, 0-255, 0-255) RGB.  Returns a QPixmap or None"""
-
-
+                #basePixmap is either the layer beneath this one (and all previous layers)
+                #or if this is the first layer, then it is an image the user wants to use
+                #as a starting point for the icon, if None, then we create a blank image with white background
                 if self.basePixmap:
                     imageBase = self.basePixmap.toImage()
 
-                    # Convert the QImage to a numpy array
+                    # Convert the QImage to a numpy array, because cv2 needs it in that format
                     width, height = imageBase.width(), imageBase.height()
                     format = imageBase.format()
 
@@ -493,6 +760,7 @@ class CustomToolbarEditor(QtGui.QWidget):
                     elif format == 4 or format == QtGui.QImage.Format.Format_ARGB32_Premultiplied:  # RGBA format (4 bytes per pixel)
                         image_array = np.frombuffer(imageBase.constBits(), dtype=np.uint8).reshape((height, width, 4))
                     else:
+                        #unknown format, so ignore this base image and start with a new blank image instead
                         self.cte.showMsg(f"Unsupported bits per pixel in base icon: {format}, ignoring base icon","error")
                         image_array = None
                         image = np.zeros((64, 64, 3), dtype=np.uint8)
@@ -505,43 +773,169 @@ class CustomToolbarEditor(QtGui.QWidget):
                             image = cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
                         image = cv2.resize(image, (64, 64))
 
-                else: #no base icon
+                else: #no base icon, so start with new, blank image.
+                      #Could put this in another function since there is some code
+                      #duplication, but it's only 2 lines...
                     image = np.zeros((64, 64, 3), dtype=np.uint8)
                     image[:, :] = bgColor  # Set the entire image to background color
 
-                font = self.fonts[self.fontBox.currentText()]
-                font_scale = scale
-                font_color = color
-                font_thickness = thickness
+                #check if text is a valid polygon() function call first
+                #if so, we translate it into a polyine() call and just use
+                #polyline() to handle it from there
+                polygonString = self.polygon_to_polyline(text)
+                if polygonString:
+                    text = polygonString #we do the polygon with existing polyline code
+                    #print(f"polygonString = {polygonString}")
 
-                # Get the size of the text
-                text_size = cv2.getTextSize(text, font, font_scale, font_thickness)[0]
+                #line(x1, y1, x2, y2)
+                linePattern = r"^line\((\d+),(\d+),(\d+),(\d+)\)"
+                lineMatch = re.search(linePattern, text.lower().replace(" ",""))
+                #rectangle(top left x, top left y, bottom right x, bottom right y)
+                rectanglePattern = r"^rectangle\((\d+),(\d+),(\d+),(\d+)\)"
+                rectangleMatch = re.search(rectanglePattern, text.lower().replace(" ",""))
+                #circle(x,y,radius)
+                circlePattern = r"^circle\((\d+),(\d+),(\d+)\)"
+                circleMatch = re.search(circlePattern, text.lower().replace(" ",""))
+                #polyline(x1,y1,x2,y2,x3,y3,...) #end with x1,y1 if you want a closed polygon
+                polylinePattern = r"^polyline\("
+                polylineMatch = re.search(polylinePattern, text.lower().replace(" ",""))
+                #ellipse(x, y, major radius,minor radius,angle=0)
+                ellipsePattern = r"ellipse\((\d+),(\d+),(\d+),(\d+)(?:,(\d+))?\)"
+                ellipseMatch = re.search(ellipsePattern, text.lower().replace(" ",""))
 
-                # Calculate the position to center the text
-                x = (image.shape[1] - text_size[0]) // 2 + self.xAdjustSpinBox.value()
-                y = (image.shape[0] + text_size[1]) // 2 + self.yAdjustSpinBox.value()
+                #everything can be dragged
+                xAdj = self.xAdjustSpinBox.value()
+                yAdj = self.yAdjustSpinBox.value()
 
-                if not "\\n" in text:
-                    if borderThickness:
-                        cv2.putText(image, text, (x, y), font, font_scale, borderColor, \
-                                font_thickness + borderThickness, lineType=cv2.LINE_AA)
-                    cv2.putText(image, text, (x, y), font, font_scale, font_color, font_thickness)
-                else:
-                    idx = text.find("\\n")
-                    text1 = text[:idx]
-                    text2 = text[idx+2:]
-                    #print(f"text1,text2: {text1},{text2}")
-                    if borderThickness:
-                        cv2.putText(image, text1, (x, y), font, font_scale, borderColor, \
-                                            font_thickness + borderThickness, lineType=cv2.LINE_AA)
-                        cv2.putText(image, text2, (x, y + int(text_size[1] * 1.25)), font, font_scale, borderColor, \
-                                            font_thickness + borderThickness, lineType=cv2.LINE_AA)
-                    cv2.putText(image, text1, (x, y), font, font_scale, font_color, font_thickness)
-                    cv2.putText(image, text2, (x, y + int(text_size[1] *1.25)), font, font_scale, font_color, font_thickness)
-                    if text.count("\\n") > 1:
-                        self.cte.showMsg("Only 2 lines of text supported at this time, 3rd and later lines ignored.", "warning")
+                #only text and things with a radius property are scaled
+                scaleAdj = self.scaleSpinBox.value()
+                #only objects with angle property get adjusted with this
+                angleAdj = self.angleAdjustSpinBox.value()
 
-                if image is not None:
+
+                if lineMatch:
+                    x1 = int(lineMatch.group(1))
+                    y1 = int(lineMatch.group(2))
+                    x2 = int(lineMatch.group(3))
+                    y2 = int(lineMatch.group(4))
+
+                    if borderThickness != 0:
+                        cv2.line(image, (x1 + xAdj ,y1 + yAdj), (x2 + xAdj,y2 + yAdj), borderColor, thickness + borderThickness)
+                    cv2.line(image, (x1 + xAdj ,y1 + yAdj), (x2 + xAdj,y2 + yAdj), color, thickness)
+
+                elif rectangleMatch:
+                    x1 = int(rectangleMatch.group(1))
+                    y1 = int(rectangleMatch.group(2))
+                    x2 = int(rectangleMatch.group(3))
+                    y2 = int(rectangleMatch.group(4))
+
+                    if borderThickness != 0:
+                        cv2.rectangle(image, (x1 + xAdj ,y1 + yAdj), (x2 + xAdj,y2 + yAdj), borderColor, thickness + borderThickness)
+                    cv2.rectangle(image, (x1 + xAdj ,y1 + yAdj), (x2 + xAdj,y2 + yAdj), color, thickness)
+
+                elif circleMatch:
+                    x = int(circleMatch.group(1))
+                    y = int(circleMatch.group(2))
+                    r = int(round(float(circleMatch.group(3)) * scaleAdj))
+
+                    if borderThickness != 0:
+                        cv2.circle(image, (x + xAdj ,y + yAdj), r, borderColor, thickness + borderThickness)
+                    cv2.circle(image, (x + xAdj ,y + yAdj), r, color, thickness)
+
+                elif polylineMatch:
+                    #this was a bit tricky, hence the reason for using it for polygon(), too
+                    #the unknown argument count nature of the beast made coming up with a
+                    #working regular expression non-trivial (for me, anyway), so simple text
+                    #parsing is used instead
+
+                    points = []
+
+                    input_string = text.lower().replace(" ","")
+                    start_index = input_string.find("polyline(")
+
+                    # Remove the "polyline(" part of the string
+                    polyline_data = input_string[start_index + len("polyline("):]
+
+                    # Check if the string ends with a closing ')' character
+                    if polyline_data.endswith(")"):
+                        # Remove the closing ')' character
+                        polyline_data = polyline_data[:-1]
+                        coordinates = polyline_data.split(',')
+
+                        # Ensure there are at least two coordinates to form pairs
+                        if len(coordinates) >= 2:
+                            #cv2 needs int arguments, it seems
+                            points = [(int(coordinates[i]), int(coordinates[i + 1])) for i in range(0, len(coordinates), 2)]
+                            #print(f"points = {points}")
+
+                    if points:
+                        #print(f"points = {points}")
+                        points = [(x + xAdj, y + yAdj) for x,y in points]
+                        is_closed = points[-1] == points[0]
+
+                        if is_closed:
+                            if borderThickness > 0: #do the border first, strip last point since we're using isClosed = True
+                                cv2.polylines(image, [np.array(points[:-1])], isClosed=True, color=borderColor, \
+                                                       thickness = thickness + borderThickness)
+                            if thickness == -1: #fill the polygon if thickness = -1
+                                cv2.fillPoly(image, [np.array(points)], color)
+                            elif thickness > 0:
+                                cv2.polylines(image, [np.array(points[:-1])], isClosed=True, color=color, thickness=thickness)
+                        else: #not closed, so no fill option and we don't strip the last point from points list
+                            if borderThickness > 0: #do the border first
+                                cv2.polylines(image, [np.array(points)], isClosed=False, color=borderColor, \
+                                                       thickness = thickness + borderThickness)
+                            if thickness > 0:
+                                cv2.polylines(image, [np.array(points)], isClosed=False, color=color, thickness=thickness)
+                elif ellipseMatch:
+                    center_x = int(ellipseMatch.group(1))
+                    center_y = int(ellipseMatch.group(2))
+                    major_axis = int(round(float(ellipseMatch.group(3)) * scaleAdj))
+                    minor_axis = int(round(float(ellipseMatch.group(4)) * scaleAdj))
+                    #angle is optional argument, defaulting to 0 if left out
+                    angle = int(ellipseMatch.group(5)) if ellipseMatch.group(5) is not None else 0
+
+                    cv2.ellipse(image, (center_x + xAdj, center_y + yAdj), (major_axis, minor_axis), angle + angleAdj, 0, 360, \
+                                                borderColor, borderThickness + thickness)
+
+                    cv2.ellipse(image, (center_x + xAdj, center_y + yAdj), (major_axis, minor_axis), angle + angleAdj, 0, 360, \
+                                                color, thickness)
+
+                else: #interpret as text
+
+                    font = self.fonts[self.fontBox.currentText()]
+                    font_scale = scale
+                    font_color = color
+                    font_thickness = thickness if thickness >= 1 else 1
+
+                    # Get the size of the text
+                    text_size = cv2.getTextSize(text, font, font_scale, font_thickness)[0]
+
+                    # Calculate the position to center the text
+                    x = (image.shape[1] - text_size[0]) // 2 + self.xAdjustSpinBox.value()
+                    y = (image.shape[0] + text_size[1]) // 2 + self.yAdjustSpinBox.value()
+
+                    if not "\\n" in text:
+                        if borderThickness:
+                            cv2.putText(image, text, (x, y), font, font_scale, borderColor, \
+                                    font_thickness + borderThickness, lineType=cv2.LINE_AA)
+                        cv2.putText(image, text, (x, y), font, font_scale, font_color, font_thickness)
+                    else:
+                        idx = text.find("\\n")
+                        text1 = text[:idx]
+                        text2 = text[idx+2:]
+                        #print(f"text1,text2: {text1},{text2}")
+                        if borderThickness:
+                            cv2.putText(image, text1, (x, y), font, font_scale, borderColor, \
+                                                font_thickness + borderThickness, lineType=cv2.LINE_AA)
+                            cv2.putText(image, text2, (x, y + int(text_size[1] * 1.25)), font, font_scale, borderColor, \
+                                                font_thickness + borderThickness, lineType=cv2.LINE_AA)
+                        cv2.putText(image, text1, (x, y), font, font_scale, font_color, font_thickness)
+                        cv2.putText(image, text2, (x, y + int(text_size[1] *1.25)), font, font_scale, font_color, font_thickness)
+                        if text.count("\\n") > 1:
+                            self.cte.showMsg("Only 2 lines of text supported at this time, 3rd and later lines ignored.", "warning")
+
+                if image is not None: #image is a numpy object we need to convert to actual pixmap
 
                     h, w, ch = image.shape
                     bytes_per_line = ch * w
@@ -560,15 +954,27 @@ class CustomToolbarEditor(QtGui.QWidget):
                     icon = FreeCADGui.getIcon(system_name)
                     button.setIcon(icon)
 
+        # end SimpleIconMaker #############
+
+
+        #try the import here instead of at the top so users who lack this package
+        #can still use the macro, just not the icon maker feature
+
         try:
             import cv2
         except:
             self.showMsg("This feature requires openCV package.  Install with pip install opencv-python", "error")
             return
-
-        dlg = SimpleIconMaker(self)
-        dlg.exec_()
-        dlg.deleteLater()
+        self.iconMakerTabWidget = QtGui.QTabWidget()
+        self.iconMakerTabWidget.setObjectName("IconMakerTabWidget")
+        self.iconMakerTabWidget.setWindowTitle("Simple 64x64 Icon Maker")
+        self.iconMakerDlg = SimpleIconMaker(self, layer=1, tabWidget = self.iconMakerTabWidget)
+        self.iconMakerDlg.closeTabButton.setEnabled(False)
+        self.iconMakerTabWidget.addTab(self.iconMakerDlg,"Layer1")
+        self.iconMakerTabWidget.installEventFilter(self.iconMakerDlg)
+        self.iconMakerTabWidget.show()
+        self.iconMakerDlg.textEdit.selectAll()
+        self.iconMakerDlg.textEdit.setFocus()
 
     def removeMacroAction(self):
         """removes the current macro's action from the system.  Does not delete macro file"""
@@ -1546,8 +1952,12 @@ class CustomToolbarEditor(QtGui.QWidget):
 class SystemIconSelector(QtGui.QDialog):
     """creates a dialog of icon buttons for the user to select from among available system icons
        These basenames are filenames from the 0.22 source code in src/Gui/Icons"""
-    def __init__(self, parseModFolder, cte):
+    def __init__(self, parseModFolder, cte, bShowBrowseButton=False, bShowStyleIcons=False):
         self.cte = cte #to use with showMsg()
+        self.bUseStyle = False #to use text data to generate a style icon
+        self.bShowBrowseButton = bShowBrowseButton
+        self.bShowStyleIcons = bShowStyleIcons
+        self.bLoadFromDisk = False
         self.basenames = ['AddonManager', 'Document', 'DrawStyleAsIs', 'DrawStyleFlatLines', 'DrawStyleHiddenLine', \
 'DrawStyleNoShading', 'DrawStylePoints','DrawStyleShaded', 'DrawStyleWireFrame', 'Feature', 'Geofeaturegroup',\
 'Group', 'Invisible', 'Link', 'LinkArray', 'LinkArrayOverlay', 'LinkElement', 'LinkGroup', 'LinkImport',\
@@ -1577,6 +1987,22 @@ class SystemIconSelector(QtGui.QDialog):
 'view-rotate-left', 'view-rotate-right', 'view-select', 'view-top', 'view-unselectable', 'window-new', 'zoom-all', \
 'zoom-border', 'zoom-fit-best', 'zoom-in', 'zoom-out', 'zoom-selection']
 
+        self.styles = ['SP_ArrowBack', 'SP_ArrowDown', 'SP_ArrowForward', 'SP_ArrowLeft', 'SP_ArrowRight', 'SP_ArrowUp',\
+         'SP_BrowserReload', 'SP_BrowserStop', 'SP_CommandLink', 'SP_ComputerIcon', 'SP_CustomBase', 'SP_DesktopIcon', \
+         'SP_DialogAbortButton', 'SP_DialogApplyButton', 'SP_DialogCancelButton', 'SP_DialogCloseButton', 'SP_DialogDiscardButton',\
+         'SP_DialogHelpButton', 'SP_DialogIgnoreButton', 'SP_DialogNoButton', 'SP_DialogNoToAllButton', 'SP_DialogOkButton',\
+         'SP_DialogOpenButton', 'SP_DialogResetButton', 'SP_DialogRetryButton', 'SP_DialogSaveAllButton', 'SP_DialogSaveButton',\
+         'SP_DialogYesButton', 'SP_DialogYesToAllButton', 'SP_DirClosedIcon', 'SP_DirHomeIcon', 'SP_DirIcon', 'SP_DirLinkIcon',\
+         'SP_DirLinkOpenIcon', 'SP_DirOpenIcon', 'SP_DockWidgetCloseButton', 'SP_DriveCDIcon', 'SP_DriveDVDIcon', 'SP_DriveFDIcon',\
+         'SP_DriveHDIcon', 'SP_DriveNetIcon', 'SP_FileDialogBack', 'SP_FileDialogContentsView', 'SP_FileDialogDetailedView',\
+         'SP_FileDialogEnd', 'SP_FileDialogInfoView', 'SP_FileDialogListView', 'SP_FileDialogNewFolder', 'SP_FileDialogStart',\
+         'SP_FileDialogToParent', 'SP_FileIcon', 'SP_FileLinkIcon', 'SP_LineEditClearButton', 'SP_MediaPause', 'SP_MediaPlay',\
+         'SP_MediaSeekBackward', 'SP_MediaSeekForward', 'SP_MediaSkipBackward', 'SP_MediaSkipForward', 'SP_MediaStop', 'SP_MediaVolume',\
+         'SP_MediaVolumeMuted', 'SP_MessageBoxCritical', 'SP_MessageBoxInformation', 'SP_MessageBoxQuestion', 'SP_MessageBoxWarning',\
+         'SP_RestoreDefaultsButton', 'SP_TitleBarCloseButton', 'SP_TitleBarContextHelpButton', 'SP_TitleBarMaxButton',\
+         'SP_TitleBarMenuButton', 'SP_TitleBarMinButton', 'SP_TitleBarNormalButton', 'SP_TitleBarShadeButton', 'SP_TitleBarUnshadeButton',\
+         'SP_ToolBarHorizontalExtensionButton', 'SP_ToolBarVerticalExtensionButton', 'SP_TrashIcon', 'SP_VistaShield']
+
         super(SystemIconSelector, self).__init__()
         self.setWindowTitle("System Icon Selector")
 
@@ -1592,6 +2018,9 @@ class SystemIconSelector(QtGui.QDialog):
 
         def trigger(val):
             return lambda : self.setIconText(val)
+
+        def styleTrigger(val):
+            return lambda : self.setIconStyleText(val)
 
         #we make a grid of clickable icon buttons the user can choose from for a toolbar icon
         iconCount = 0
@@ -1626,9 +2055,36 @@ class SystemIconSelector(QtGui.QDialog):
             except Exception as e:
                 pass
 
+        if self.bShowStyleIcons:
+            for n, style in enumerate(self.styles):
+                try:
+                    btn = QtGui.QPushButton()
+                    btn.installEventFilter(self)
+                    btn.setToolTipDuration(2)
+                    pixmapi = getattr(QtGui.QStyle, style)
+                    icon = self.style().standardIcon(pixmapi)
+                    if icon:
+                        btn.setIcon(icon)
+                        btn.setToolTip(style)
+                        btn.clicked.connect(styleTrigger(style))
+                        layout.addWidget(btn, iconCount // 8, iconCount % 8)
+                        iconCount += 1
+                except Exception as e:
+                    pass
 
         # Set the layout of the main window
+        # this dialog called from 2 places: main toolbar manager editor
+        # and within the simple icon maker dialog
+        # when called from main we don't show the browse icon because there is a
+        # separate button for that, and we don't show the style icons because
+        # they are not directly supported in the pixmap field in FreeCAD
+        # but we can make them readily enough for our purposes, so we do show
+        # the style icons when the icon maker opens this dialog
         main_layout = QtGui.QVBoxLayout()
+        if self.bShowBrowseButton:
+            loadFromDiskButton = QtGui.QPushButton("Load from disk")
+            main_layout.addWidget(loadFromDiskButton)
+            loadFromDiskButton.clicked.connect(self.loadFromDiskButtonClicked)
         main_layout.addWidget(scrollArea)
         self.setLayout(main_layout)
 
@@ -1735,6 +2191,15 @@ class SystemIconSelector(QtGui.QDialog):
 
     def setIconText(self,value):
         self.icon_text = value
+        self.close()
+
+    def setIconStyleText(self, value):
+        self.icon_text = value
+        self.bUseStyle = True
+        self.close()
+
+    def loadFromDiskButtonClicked(self):
+        self.bLoadFromDisk = True
         self.close()
 
 class Macro:
@@ -3014,8 +3479,4 @@ Must be toolbar / workbench combination selected in the dialog.</string>
 </ui>
 
 '''
-
-
-
-
 dlg = CustomToolbarEditor()
