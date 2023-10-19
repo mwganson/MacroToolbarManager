@@ -4,12 +4,12 @@
 #
 #Goal is to make it simpler and easier to manage custom
 #macros on custom toolbars
-__version__ = "0.2023.10.13"
+__version__ = "0.2023.10.19"
 
 LOAD_STRING = True #load UI from a string defined in this file if True,
                    #else from a separate ui file during development
 
-from PySide import QtGui,QtCore
+from PySide import QtGui,QtCore,QtSvg
 import os
 import tempfile
 import importlib.util
@@ -19,6 +19,8 @@ import re
 import PIL
 import time
 import numpy as np
+import math
+import json
 
 __dir__ = FreeCAD.getUserMacroDir(True)
 __Requires__ = 'opencv-python'
@@ -38,6 +40,7 @@ class CustomToolbarEditor(QtGui.QWidget):
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
         self.setAttribute(QtCore.Qt.WA_WindowPropagation,True)
         self.iconMakerTabWidget = None
+        self.iconMakerDlg = None
         if not LOAD_STRING:
             self.form = FreeCADGui.PySideUic.loadUi(uiPath + "/custom_toolbar.ui")
         else:
@@ -82,9 +85,9 @@ class CustomToolbarEditor(QtGui.QWidget):
 
     def QIconFromXPMString(self, xpm_string):
         if "/*pixels*/" in xpm_string:
-            xpm = xpm_string.replace("\"","").replace(',','').splitlines()[4:-1]
+            xpm = xpm_string.replace("\"","").replace(',','').splitlines()[4:]
         else:
-            xpm = xpm_string.replace("\"","").replace(',','').splitlines()[3:-1]
+            xpm = xpm_string.replace("\"","").replace(',','').splitlines()[3:]
         for line in reversed(xpm):
             if line.startswith("/*") and line.endswith("*/"):
                 xpm.pop(xpm.index(line))
@@ -235,6 +238,573 @@ class CustomToolbarEditor(QtGui.QWidget):
                 clr = self.getColor(current,None,self.title, self.flags)
                 return clr
 
+        class EditableListWidget(QtGui.QWidget):
+            def __init__(self, iconEditor, pointsColor):
+                super().__init__()
+                self.iconEditor = iconEditor
+                self.pointsColor = pointsColor
+                self.initUI()
+                self.signalsBlocked = False
+                self.flashingBlocked = False
+                self.showPointsAllowed = True
+                self.backupPoints = []
+                self.undoTransformationPoints = []
+                self.isFlashing = False
+
+            def initUI(self):
+                self.layout = QtGui.QGridLayout()
+
+                self.list_widget = QtGui.QListWidget(self)
+                self.list_widget.setMaximumWidth(150)
+                self.layout.addWidget(self.list_widget,0,0,3,1)
+                self.list_widget.currentItemChanged.connect(self.handleItemChanged)
+                #self.list_widget.itemDoubleClicked.connect(self.editItem)
+
+                self.showPointsCheckBox = QtGui.QCheckBox("Show points")
+                self.showPointsCheckBox.setChecked(True)
+                self.layout.addWidget(self.showPointsCheckBox,0,1,1,1)
+                self.showPointsCheckBox.toggled.connect(self.showPointsToggled)
+                self.colorButton = QtGui.QPushButton("Points")
+                self.layout.addWidget(self.colorButton,0,2,1,1)
+                self.setColor(self.pointsColor)
+                self.colorButton.clicked.connect(self.onColorButtonClicked)
+                self.colorButton.setToolTip("Color for the construction mode points")
+
+                self.xSpinBox = QtGui.QSpinBox()
+                self.xSpinBox.setToolTip("Alt + Click up or down = Etch-a-sketch (TM) mode")
+                self.xSpinBox.valueChanged.connect(self.onValueChanged)
+                self.layout.addWidget(self.xSpinBox,1,1,1,1)
+
+                self.ySpinBox = QtGui.QSpinBox()
+                self.ySpinBox.setToolTip("Alt + Click up or down = Etch-a-sketch (TM) mode")
+                self.ySpinBox.valueChanged.connect(self.onValueChanged)
+                self.layout.addWidget(self.ySpinBox,1,2,1,1)
+
+                self.clearButton = QtGui.QPushButton("Clear")
+                self.clearButton.clicked.connect(self.onClearButtonClicked)
+                self.layout.addWidget(self.clearButton, 2,2,1,1)
+
+                self.removePointButton = QtGui.QPushButton("Remove Pt")
+                self.removePointButton.clicked.connect(self.onRemovePointButtonClicked)
+                self.layout.addWidget(self.removePointButton, 2,1,1,1)
+
+                self.setLayout(self.layout)
+
+            def onColorButtonClicked(self):
+                colorDlg = ColorDlg("Simple Icon Maker", QtGui.QColorDialog.DontUseNativeDialog, self.getColor(), self.getColor())
+                color = colorDlg.getClr(self.getColor())
+                colorString = f'rgb({color.red()}, {color.green()}, {color.blue()})'
+                self.colorButton.setStyleSheet(f'background-color: {colorString};')
+                self.pointsColor = (color.red(), color.green(), color.blue())
+                self.showPoints()
+                self.iconEditor.pointsColor = self.pointsColor
+
+            def getColor(self):
+                """gets the current color of the color button, returns as (r,g,b,a) each a value from 0 to 255"""
+                palette = self.colorButton.palette()
+                color = palette.color(palette.Background)
+                #print(f"color = {color.red(), color.green(), color.blue()}")
+                return (color.red(), color.green(), color.blue(), 0) #0 not used, but 4 values are expected
+
+            def setColor(self, colorTuple):
+                self.pointsColor = colorTuple
+                if len(colorTuple) == 4:
+                    r,g,b,a = colorTuple
+                else:
+                    r,g,b = colorTuple
+                    a = 0
+                color = QtGui.QColor(r,g,b,a)
+                colorString = f'rgb({color.red()}, {color.green()}, {color.blue()})'
+                self.colorButton.setStyleSheet(f'background-color: {colorString};')
+
+            def onClearButtonClicked(self):
+                self.xSpinBox.setValue(0)
+                self.ySpinBox.setValue(0)
+                self.list_widget.clear()
+                self.showPoints()
+
+            def transformPointsTriggered(self):
+                """apply the xAdjust, yAdjust, scale, and angle spinbox values to the points
+                   angle comes from the Angle spin box, the center of rotation is the selected
+                   point in the list widget. 0 degrees is the 3 o'clock position, and moves
+                   clockwise from there.  The rotation is applied first, then we move the points,
+                   and finally the scaling is done.
+                """
+                def rotate_point(point, center, angle_degrees):
+                    x, y = point
+                    cx, cy = center
+                    angle_radians = math.radians(angle_degrees)
+                    new_x = cx + round((x - cx) * math.cos(angle_radians) - (y - cy) * math.sin(angle_radians))
+                    new_y = cy + round((x - cx) * math.sin(angle_radians) + (y - cy) * math.cos(angle_radians))
+                    return (new_x, new_y)
+
+                def rotate_points(point_list, center, angle_degrees):
+                    return [rotate_point(point, center, angle_degrees) for point in point_list]
+
+                def scale_around_center(points, scale_factor):
+                    center_x, center_y = 32, 32  # New center for scaling
+                    # Step 1: Translate points to make (32, 32) the origin
+                    translated_points = [(x - center_x, y - center_y) for x, y in points]
+                    # Step 2: Perform the scaling transformation
+                    scaled_points = [(x * scale_factor, y * scale_factor) for x, y in translated_points]
+                    # Step 3: Translate points back to their original positions
+                    final_points = [(x + center_x, y + center_y) for x, y in scaled_points]
+                    return final_points
+                self.iconEditor.transformPointsButton.setEnabled(False)
+                modifiers = QtGui.QApplication.keyboardModifiers()
+                retain = False if not modifiers == QtCore.Qt.AltModifier else True
+                if modifiers == QtCore.Qt.ShiftModifier:
+                    undo = self.undoTransformationPoints.pop() if self.undoTransformationPoints else []
+                    if undo:
+                        self.addPoints(undo)
+                        self.iconEditor.cte.showMsg("Points transformation undone.")
+                        self.showPoints()
+                    else:
+                        self.iconEditor.cte.showMsg("Undo queue is empty","warning")
+                    self.iconEditor.transformPointsButton.setEnabled(True)
+                    return
+                else:
+                    self.undoTransformationPoints.append(self.getPoints())
+                    self.iconEditor.cte.showMsg("Points backed up in memory prior to transformation, use Shift + command to undo")
+
+                row = self.list_widget.currentRow()
+                if row == -1:
+                    self.iconEditor.transformPointsButton.setEnabled(True)
+                    return
+
+                center = self.getPoints()[row]
+                angle = self.iconEditor.angleAdjustSpinBox.value()
+                if angle:
+                    rotatedPoints = rotate_points(self.getPoints(), center, angle)
+                else:
+                    rotatedPoints = self.getPoints()
+                movedPoints = [(p[0]+self.iconEditor.xAdjustSpinBox.value(),p[1]+self.iconEditor.yAdjustSpinBox.value()) for p in rotatedPoints]
+                scale = self.iconEditor.scaleSpinBox.value()
+                if scale != 1.0:
+                    scaledPoints = scale_around_center(movedPoints, scale)
+                    scaledPoints = [(int(round(p[0])),int(round(p[1]))) for p in scaledPoints]
+                    self.addAndRetainPoints(scaledPoints, retain)
+                else:
+                    self.addAndRetainPoints(movedPoints, retain)
+                self.select(row)
+                self.showPoints()
+                self.iconEditor.transformPointsButton.setEnabled(True)
+
+
+            def addAndRetainPoints(self, pts, bRetain):
+                """add pts to current points if bRetain else replace existing"""
+                def fold(list1, list2):
+                    """we fold them in so if polyline is used the lines will not be crossed, hopefully"""
+                    result = []
+                    #lengths should be the same, but just in case they're not...
+                    max_len = max(len(list1), len(list2))
+                    #fold them together
+                    #example: list1 = [0,2,4], list2 = [1,3,5], fold(list1,list2) -> [0,1,2,3,4,5]
+                    for i in range(max_len):
+                        if i < len(list1):
+                            result.append(list1[i])
+                        if i < len(list2):
+                            result.append(list2[i])
+                    return result
+
+                if not bRetain:
+                    self.addPoints(pts)
+                else:
+                    currentPoints = self.getPoints()
+                    newPoints = fold(currentPoints,pts)
+                    newPoints = self.remove_consecutive_duplicates(newPoints)
+                    self.addPoints(newPoints)
+
+            def importVerticesTriggered(self):
+                """Import vertices selected vertices"""
+                selx = FreeCADGui.Selection.getCompleteSelection()
+                if not selx:
+                    self.iconEditor.statusBox.setText("Select some vertices to import into the points and try again.\n")
+                    return
+                if bool(selx[0].SubElementNames[0]):
+                    self.iconEditor.statusBox.setText("Importing selected vertices.  You can use these with polyline() to \n" +\
+                                            "connect them together or one of the other element functions.")
+                    points = []
+                    for sel in selx:
+                        for v in sel.SubObjects:
+                            if hasattr(v,"X"):
+                                p = (int(round(v.X)),int(round(v.Y)))
+                                points.append(p)
+                    points = self.mirror_in_y_direction(points)
+                    points = self.remove_consecutive_duplicates(points)
+                else:
+                    self.iconEditor.statusBox.setText("Importing all vertices of the selected objects, projected to the xy plane.\n" +\
+                                            "Any consecutive duplicates will be removed.")
+                    for sel in selx:
+                        points = [v.Point for v in sel.Object.Shape.Vertexes if hasattr(sel.Object,"Shape")]
+                        points = [(int(round(p[0])),int(round(p[1]))) for p in points]
+                        points = self.mirror_in_y_direction(points)
+                    points = self.remove_consecutive_duplicates(points)
+                self.addPoints(points)
+                self.showPoints()
+
+            def loadPointsTriggered(self):
+                options = QtGui.QFileDialog.Options()
+                options |= QtGui.QFileDialog.ReadOnly
+                file_dialog = QtGui.QFileDialog()
+                file_dialog.setDefaultSuffix("json")
+                filename, ok = file_dialog.getOpenFileName(None, "Open Points", "", "JSON Files (*.json);;All Files (*)", options=options)
+
+                if filename:
+                    with open(filename, 'r') as file:
+                        points = json.load(file)
+                    self.addPoints(points)
+                    self.showPoints()
+
+            def savePointsTriggered(self):
+                points = self.getPoints()
+                file_dialog = QtGui.QFileDialog()
+                file_dialog.setDefaultSuffix("json")
+                filename, ok = file_dialog.getSaveFileName(None, "Save Points", "", "JSON Files (*.json);;All Files (*)")
+
+                if filename:
+                    with open(filename, 'w') as file:
+                        json.dump(points, file)
+
+            def copyPointsTriggered(self):
+                clip = QtGui.QClipboard()
+                points = self.getPoints()
+                clip.setText(json.dumps(points))
+
+            def remove_consecutive_duplicates(self, input_list):
+                if not input_list:
+                    return input_list
+                result = [input_list[0]]
+                for item in input_list[1:]:
+                    if item != result[-1]:
+                        result.append(item)
+                return result
+
+            def importDiscretizedEdgesTriggered(self):
+                """import points by discretizing edges of selected object"""
+                selx = FreeCADGui.Selection.getSelectionEx()
+                if not selx:
+                    self.iconEditor.statusBox.setText("Select an object from which to import the points and try again.")
+                    return
+                if len(selx) > 1:
+                    self.iconEditor.statusBox.setText("Select only one object.")
+                    return
+                obj = selx[0].Object
+                if not obj.isDerivedFrom("Part::Feature"):
+                    self.iconEditor.statusBox.setText("Selected object must be a Part feature.")
+                    return
+                points = []
+                if not selx[0].HasSubObjects:
+                    edges = obj.Shape.Edges
+                else:
+                    edges = selx[0].SubObjects
+                for edge in edges:
+                    length = int(round(edge.Length))
+                    if length:
+                        pts = edge.discretize(length)
+                        pts = [(int(round(p[0])),int(round(p[1]))) for p in pts]
+                        pts = self.mirror_in_y_direction(pts)
+                        points.extend(pts)
+                points = self.remove_consecutive_duplicates(points)
+                self.addPoints(points)
+                self.showPoints()
+                if not selx[0].HasSubObjects and len(obj.Shape.Wires) > 1:
+                    self.iconEditor.statusBox.setText("Input object has multiple wires.  It is generally recommended to only\n"+\
+                                                      "use objects with single wires. You can also select the edges to use.")
+                elif points:
+                    self.iconEditor.statusBox.setText("Now you can use polylines() on these points.")
+
+
+            def pastePointsTriggered(self):
+                clip = QtGui.QClipboard()
+                text = clip.text()
+                points = json.loads(text)
+                self.addPoints(points)
+                self.showPoints()
+
+            def mirror_in_y_direction(self, points):
+                """translates and mirrors points from imported objects because
+                the coordinate system here has 0,0 at the top left corner"""
+
+                if not points:
+                    return points
+
+                tx = 32
+                ty = 32
+
+                # Apply the translation to all points and mirror in the Y direction
+                mirrored_points = [(x + tx, 64 - (y + ty)) for x, y in points]
+                return mirrored_points
+
+
+
+            def geometryFromSketchTriggered(self):
+                """get the geometry from a sketch and pass it as a string to makeImage()"""
+                sel = FreeCADGui.Selection.getSelection()
+
+                obj = sel[0] if sel else None
+                if not obj or not obj.isDerivedFrom("Sketcher::SketchObject"):
+                    msgBox = QtGui.QMessageBox()
+                    msgBox.setWindowTitle("Sketch required")
+                    msgBox.setIcon(QtGui.QMessageBox.Information)
+                    msgBox.setText(\
+                    "A sketch with geometry to import is required for this feature.\n" +\
+                    "Please select a sketch and run the command again, or if you do \n" +\
+                    "not yet have a sketch we can create one for you with a construction \n" +\
+                    "mode rectangle showing you where to place your sketch elements.\n\n" +\
+                    "Would you like to create a sketch now? Yes or no?\n")
+                    msgBox.setStandardButtons(QtGui.QMessageBox.Yes | QtGui.QMessageBox.No)
+                    result = msgBox.exec_()
+                    if result == msgBox.Yes:
+                        import Sketcher, Part
+                        doc = FreeCAD.ActiveDocument if FreeCAD.ActiveDocument else FreeCAD.newDocument()
+                        sketch = doc.addObject("Sketcher::SketchObject", "Icon_Sketch")
+                        points =[((-32,32,0),(32,32,0)),((32,32,0),(32,-32,0)),((32,-32,0),(-32,-32,0)),((-32,-32,0),(-32,32,0))]
+                        for ii in range(4):
+                            sketch.addGeometry(Part.LineSegment(FreeCAD.Vector(points[ii][0]),FreeCAD.Vector(points[ii][1])))
+                            sketch.toggleConstruction(ii)
+                        #sketch.addGeometry(geoList,False)
+
+                        conList = []
+                        conList.append(Sketcher.Constraint('Coincident',0,2,1,1))
+                        conList.append(Sketcher.Constraint('Coincident',1,2,2,1))
+                        conList.append(Sketcher.Constraint('Coincident',2,2,3,1))
+                        conList.append(Sketcher.Constraint('Coincident',3,2,0,1))
+                        conList.append(Sketcher.Constraint('Horizontal',0))
+                        conList.append(Sketcher.Constraint('Horizontal',2))
+                        conList.append(Sketcher.Constraint('Vertical',1))
+                        conList.append(Sketcher.Constraint('Vertical',3))
+                        sketch.addConstraint(conList)
+                        sketch.addConstraint(Sketcher.Constraint('Equal',1,0))
+
+                        sketch.addConstraint(Sketcher.Constraint('DistanceX',0,1,0,2,64))
+                        sketch.setDatum(9,App.Units.Quantity('64 mm'))
+                        sketch.addConstraint(Sketcher.Constraint('Symmetric',1,2,0,1,-1,1))
+                        doc.recompute()
+                        FreeCADGui.Selection.clearSelection()
+                        FreeCADGui.Selection.addSelection(sketch)
+                        FreeCADGui.ActiveDocument.setEdit(sketch)
+                        return
+                    else:
+                        return
+                geometry = obj.Geometry
+                strings = ["SketchImported:"]
+
+                for idx,geom in enumerate(geometry):
+                    if obj.getConstruction(idx):
+                        continue
+                    if geom.TypeId == "Part::GeomLineSegment":
+                        start = geom.StartPoint[:-1]
+                        end = geom.EndPoint[:-1]
+                        p1,p2 = self.mirror_in_y_direction([start,end])
+                        p1 = (int(round(p1[0])),int(round(p1[1])))
+                        p2 = (int(round(p2[0])),int(round(p2[1])))
+                        strings.append(f"line({p1[0]},{p1[1]},{p2[0]},{p2[1]})")
+                    elif geom.TypeId == "Part::GeomArcOfCircle" \
+                         or geom.TypeId == "Part::GeomBSplineCurve" \
+                         or geom.TypeId == "Part::GeomEllipse" \
+                         or geom.TypeId == "Part::GeomArcOfEllipse" \
+                         or geom.TypeId == "Part::GeomArcOfHyperbola":
+                        length = int(round(geom.length()))
+                        pts = geom.discretize(length)
+                        pts = [(p[0],p[1]) for p in pts]
+                        p1 = pts[0]
+                        for p2 in pts[1:]:
+                            p3 = (int(round(p1[0])),int(round(p1[1])))
+                            p4 = (int(round(p2[0])),int(round(p2[1])))
+                            p5,p6 = self.mirror_in_y_direction([p3,p4])
+                            strings.append(f"line({p5[0]},{p5[1]},{p6[0]},{p6[1]})")
+                            p1 = p2
+                    elif geom.TypeId == "Part::GeomCircle":
+                        radius = int(round(geom.Radius))
+                        center = geom.Center
+                        cX,cY = (int(round(center[0])),int(round(center[1])))
+                        c = self.mirror_in_y_direction([(cX,cY)])
+                        cX,cY = c[0]
+                        strings.append(f"circle({cX},{cY},{radius})")
+                    elif geom.TypeId == "Part::GeomPoint":
+                        x,y = int(round(geom.X)),int(round(geom.Y))
+                        p1 = self.mirror_in_y_direction([(x,y)])
+                        x,y = p1[0]
+                        strings.append(f"line({x},{y},{x},{y})")
+
+                    else:
+                        try:
+                            length = int(round(geom.length()))
+                            pts = geom.discretize(length)
+                            pts = [(p[0],p[1]) for p in pts]
+                            p1 = pts[0]
+                            for p2 in pts[1:]:
+                                p3 = (int(round(p1[0])),int(round(p1[1])))
+                                p4 = (int(round(p2[0])),int(round(p2[1])))
+                                p5,p6 = self.mirror_in_y_direction([p3,p4])
+                                strings.append(f"line({p5[0]},{p5[1]},{p6[0]},{p6[1]})")
+                                p1 = p2
+                        except:
+                            FreeCAD.Console.PrintError(f"Unsupported geometry type: {geom.TypeId}. \n")
+
+                outString = "\n".join(strings)
+                self.iconEditor.textEdit.setText(outString)
+
+            def backupPointsTriggered(self):
+                self.backupPoints.append(self.getPoints())
+
+            def restorePointsTriggered(self):
+                if not self.backupPoints:
+                    self.iconEditor.statusBox.setText("No backup points to restore. (Use clipboard to transfer \n"+\
+                                                      "points between layers.)")
+                    return
+                self.addPoints(self.backupPoints.pop())
+                self.showPoints()
+
+            def showPointsToggled(self, checked):
+                self.showPointsAllowed = checked
+
+                self.showPointsCheckBox.blockSignals(True)
+                self.showPointsCheckBox.setChecked(self.showPointsAllowed)
+                self.showPointsCheckBox.blockSignals(False)
+
+                action = self.iconEditor.pointsMenu.findChild(QtGui.QAction, "showPointsAction")
+                if action:
+                    action.blockSignals(True)
+                    action.setChecked(self.showPointsAllowed)
+                    action.blockSignals(False)
+
+                if not checked:
+                    self.iconEditor.showPoints([],self.pointsColor) #clear points display
+                else:
+                    self.showPoints()
+
+            def showPoints(self):
+                if not self.showPointsAllowed:
+                    return
+                self.iconEditor.showPoints(self.getPoints(), self.pointsColor)
+
+            def duplicatePointTriggered(self):
+                """duplicate selected point, adds to top of list"""
+                row = self.list_widget.currentRow()
+                pts = self.getPoints()
+                pts = [pts[row]] + pts
+                self.addPoints(pts)
+                self.showPoints()
+
+            def flashPoint(self, row):
+                if self.flashingBlocked or self.isFlashing:
+                   return
+                pts = self.getPoints()
+                pts_without_row = pts[:row] + pts[row+1:]
+                flashes = 3
+                delay = .05
+                for ii in range(flashes):
+                    self.iconEditor.showPoints(pts_without_row, self.pointsColor)
+                    time.sleep(delay)
+                    FreeCADGui.updateGui()
+                    self.iconEditor.showPoints(pts, self.pointsColor)
+                    time.sleep(delay)
+                    FreeCADGui.updateGui()
+                self.isFlashing = False
+
+            def onRemovePointButtonClicked(self):
+                row = self.list_widget.currentRow()
+                self.flashingBlocked = True
+                self.list_widget.takeItem(row)
+                self.flashingBlocked = False
+                pts = self.getPoints()
+                if not pts:
+                    self.showPoints()
+                    return
+                else:
+                    self.addPoints(pts)
+                    self.select(row)
+                    pass
+                self.showPoints()
+
+            def select(self,row):
+                self.signalsBlocked = True
+                self.list_widget.setCurrentRow(row)
+                self.list_widget.scrollToItem(self.list_widget.item(row))
+                self.signalsBlocked = False
+
+            def onValueChanged(self):
+                if self.signalsBlocked:
+                    return
+                row = self.list_widget.currentRow()
+                if row == -1:
+                    return
+                pts = self.getPoints()
+                if not pts:
+                    return
+                self.flashingBlocked = True
+
+                x = self.xSpinBox.value()
+                y = self.ySpinBox.value()
+                if not QtGui.QApplication.keyboardModifiers() == QtCore.Qt.AltModifier:
+                    self.list_widget.takeItem(row)
+                self.insertNewItem((x,y),row)
+                self.showPoints()
+                self.flashingBlocked = False
+
+            def handleItemChanged(self, current, previous):
+                item = self.list_widget.currentItem()
+                if item:
+                    self.editItem(item)
+
+            def editItem(self, item):
+                pt = self.parseItem(item)
+                self.signalsBlocked = True
+                self.xSpinBox.setValue(pt[0])
+                self.ySpinBox.setValue(pt[1])
+                self.flashPoint(self.list_widget.currentRow())
+                self.signalsBlocked = False
+
+            def addPoints(self, pts):
+                self.list_widget.clear()
+                self.flashingBlocked = True
+                for pt in pts:
+                    self.addNewItem(pt)
+                self.flashingBlocked = False
+
+
+            def parseItem(self, item):
+                #txt = "1: (42,56)"  # Example string
+                if not item:
+                    return None
+                txt = item.text()
+                parts = txt.split(":")
+                if len(parts) == 2:
+                    # Extract the part within parentheses
+                    coord_str = parts[1].strip()
+                    # Remove the parentheses and split the coordinates
+                    x_str, y_str = coord_str[1:-1].split(",")
+                    # Convert "x" and "y" to integers
+                    x = int(x_str)
+                    y = int(y_str)
+                    return (x,y)
+                else:
+                    raise StandardException("invalid string format")
+
+            def getPoints(self):
+                point_list = []
+                for ii in range(self.list_widget.count()):
+                    pt = self.parseItem(self.list_widget.item(ii))
+                    point_list.append(pt)
+                return point_list
+
+            def insertNewItem(self, pt, row):
+                txt = f"{row}: ({pt[0]},{pt[1]})"
+                item = QtGui.QListWidgetItem(txt)
+                self.list_widget.insertItem(row,item)
+                self.select(row)
+
+            def addNewItem(self, pt):
+                txt = f"{self.list_widget.count()}: ({pt[0]},{pt[1]})"
+                item = QtGui.QListWidgetItem(txt)
+                self.list_widget.addItem(item)
+                self.select(0)
+
+
+
+
         class SimpleIconMaker(QtGui.QDialog):
             def __init__(self, cte, basePixmap = None, layer=1, parentDlg = None, tabWidget = None):
                 super(SimpleIconMaker, self).__init__()
@@ -244,29 +814,94 @@ class CustomToolbarEditor(QtGui.QWidget):
                 self.childDlg = None #if we spawn a new layer
                 self.closingAll = False
                 self.setWindowTitle(f"Simple 64x64 Icon Maker Layer({self.layer})")
-                #self.setWindowFlags(self.windowFlags() & ~QtCore.Qt.WindowCloseButtonHint)
+                self.seed_x = 0 #seeds used for floodfill() algorithm
+                self.seed_y = 0 #we track this to flash that seed point so the user can find it
+                self.zoomFactor = 4 #how big the image in the image label is (4*64, 4*64) = (256,256)
+                #self.lastClicks= [] #track recent clicks on the image in the image label
                 self.cte = cte #cte = Custom Toolbar Editor instance
+                self.pointsColor = (128,128,128)
+
+                self.topLayout = QtGui.QVBoxLayout()
                 self.layout = QtGui.QGridLayout()
-                self.setLayout(self.layout)
+                self.toolbar = QtGui.QToolBar()
+                self.topLayout.addWidget(self.toolbar)
+                self.topLayout.addLayout(self.layout)
+                self.setLayout(self.topLayout)
+
+                self.fileMenu = QtGui.QMenu()
+                self.fileMenuButton = QtGui.QToolButton()
+                self.fileMenuButton.setArrowType(QtCore.Qt.NoArrow)
+                self.fileMenuButton.setText("File")
+                #menuIcon = self.cte.QIconFromXPMString(self.cte.getMenuIcon())
+                #self.fileMenuButton.setIcon(menuIcon)
+                #self.fileMenuButton.setPopupMode(QtGui.QToolButton.MenuButtonPopup)
+                self.fileMenuButton.clicked.connect(self.fileMenuButton.showMenu)
+                self.fileMenuButton.setMenu(self.fileMenu)
+                self.toolbar.addWidget(self.fileMenuButton)
+
+
+
+                self.layerMenu = QtGui.QMenu()
+                self.layerMenuButton = QtGui.QToolButton()
+                self.layerMenuButton.setText("Layer")
+                #self.layerMenuButton.setPopupMode(QtGui.QToolButton.MenuButtonPopup)
+                self.layerMenuButton.clicked.connect(self.layerMenuButton.showMenu)
+                self.layerMenuButton.setMenu(self.layerMenu)
+                self.toolbar.addWidget(self.layerMenuButton)
+
+                self.pointsMenu = QtGui.QMenu()
+                self.pointsMenuButton = QtGui.QToolButton()
+                self.pointsMenuButton.setText("Points")
+                #self.pointsMenuButton.setPopupMode(QtGui.QToolButton.MenuButtonPopup)
+                self.pointsMenuButton.clicked.connect(self.pointsMenuButton.showMenu)
+                self.pointsMenuButton.setMenu(self.pointsMenu)
+                self.toolbar.addWidget(self.pointsMenuButton)
+
+                self.settingsMenu = QtGui.QMenu()
+                self.settingsMenuButton = QtGui.QToolButton()
+                self.settingsMenuButton.setText("Settings")
+                self.settingsMenuButton.clicked.connect(self.settingsMenuButton.showMenu)
+                self.settingsMenuButton.setMenu(self.settingsMenu)
+                self.toolbar.addWidget(self.settingsMenuButton)
+
+                self.importSketchButton = QtGui.QToolButton()
+                self.importSketchButton.setToolTip("Import geometry from a selected sketch.\n" +\
+                        "All elements in sketch should be *inside* a construction mode 64x64 \n" +\
+                        "mm rectangle that is constrained with its center at the origin.\n")
+                importSketchIcon = self.cte.QIconFromXPMString(import_sketch_icon)
+                self.importSketchButton.setIcon(importSketchIcon)
+                self.toolbar.addWidget(self.importSketchButton)
+
+                self.transformPointsButton = QtGui.QToolButton()
+                self.transformPointsButton.setToolTip(
+                "Transform the construction points using the scale, \n" +\
+                "angle, and x and y adjustment widgets.\n" +\
+                "Shift+Click = undo last transformation\n" +\
+                "Alt+Click = add transformed points to existing points")
+                transformIcon = self.cte.QIconFromXPMString(transformPointsIcon)
+                self.transformPointsButton.setIcon(transformIcon)
+                self.toolbar.addWidget(self.transformPointsButton)
+
+                self.recomputeButton = QtGui.QToolButton()
+                self.recomputeButton.setToolTip("Recompute this layer")
+                recomputeIcon = self.cte.QIconFromXPMString(refreshButtonIcon)
+                self.recomputeButton.setIcon(recomputeIcon)
+                self.toolbar.addWidget(self.recomputeButton)
+
+
                 self.textLabel = QtGui.QLabel("Element:")
                 self.layout.addWidget(self.textLabel, 2, 0, 1, 1)
                 self.textEdit = QtGui.QLineEdit()
-                self.textEdit.setText("A")
+                self.textEdit.setPlaceholderText("Enter text here or an element function")
                 self.textEdit.textChanged.connect(self.updateImage)
-                self.textEdit.setToolTip("\\n supported (2 lines max)" + \
-                                        "\nline(x1,y1,x2,y2)" + \
-                                        "\nthickness = -1 to fill closed objects, like circles and rectangles" + \
-                                        "\nrectangle(x1,y1,x2,y2)" + \
-                                        "\ncircle(x,y,r)" +\
-                                        "\nellipse(x,y,major,minor,angle)" +\
-                                        "\npolyline(x1,y1,x2,y2,x3,y3...) (variable argument count)" + \
-                                        "\npolygon(x,y,sides,radius,angle=0) (angle is optional, defaults to 0)" )
 
                 self.layout.addWidget(self.textEdit, 2, 1, 1, 3)
 
-                self.fontLabel = QtGui.QLabel("Font:")
-                self.layout.addWidget(self.fontLabel, 1, 0, 1, 1)
 
+                #font setting moved to menu, but we retain this for the functionality
+                #even though it's not shown
+                self.fontLabel = QtGui.QLabel("Font:")
+                #self.layout.addWidget(self.fontLabel, 1, 0, 1, 1)
                 self.fontBox = QtGui.QComboBox()
                 self.fontBox.setMinimumWidth(300)
                 self.fonts = {
@@ -280,18 +915,26 @@ class CustomToolbarEditor(QtGui.QWidget):
                          "ITALIC":cv2.FONT_ITALIC}
                 self.fontBox.currentIndexChanged.connect(self.updateImage)
                 self.fontBox.addItems(self.fonts.keys())
-                self.layout.addWidget(self.fontBox, 1, 1, 1, 3)
+                #self.layout.addWidget(self.fontBox, 1, 1, 1, 3)
+
+                self.lineTypeBox = QtGui.QComboBox()
+                self.lineTypes = {
+                        "cv2.LINE_4":cv2.LINE_4,\
+                        "cv2.LINE_8":cv2.LINE_8,\
+                        "cv2.LINE_AA":cv2.LINE_AA}
+                self.lineTypeBox.currentIndexChanged.connect(self.updateImage)
+                self.lineTypeBox.addItems(self.lineTypes.keys())
 
                 self.colorLabel = QtGui.QLabel("Color:")
                 self.layout.addWidget(self.colorLabel, 3, 0, 1, 1)
-                self.colorButton = QtGui.QPushButton()
+                self.colorButton = QtGui.QPushButton("Elements")
                 self.colorButton.setStyleSheet("background-color:red;")
                 self.colorButton.clicked.connect(self.onColorButtonClicked)
                 self.layout.addWidget(self.colorButton, 3, 1, 1, 1)
 
                 self.borderColorLabel = QtGui.QLabel("Border:")
                 self.layout.addWidget(self.borderColorLabel, 3, 2, 1, 1)
-                self.borderColorButton = QtGui.QPushButton()
+                self.borderColorButton = QtGui.QPushButton("Border")
                 self.borderColorButton.setStyleSheet("background-color:darkred;")
                 self.borderColorButton.clicked.connect(self.onBorderColorButtonClicked)
                 self.layout.addWidget(self.borderColorButton, 3, 3, 1, 1)
@@ -301,7 +944,7 @@ class CustomToolbarEditor(QtGui.QWidget):
                 self.layout.addWidget(self.scaleLabel, 5, 0, 1, 1)
                 self.scaleSpinBox = QtGui.QDoubleSpinBox()
                 self.scaleSpinBox.valueChanged.connect(self.updateImage)
-                self.scaleSpinBox.setToolTip("Only applies to text elements, scale down if your text disappears off screen")
+                self.scaleSpinBox.setToolTip("Scaling only applicable to elements with a radius or text elements or construction points")
                 self.scaleSpinBox.setRange(0.01,100)
                 self.scaleSpinBox.setSingleStep(0.1)
                 self.scaleSpinBox.setValue(1)
@@ -360,80 +1003,465 @@ class CustomToolbarEditor(QtGui.QWidget):
                 self.yAdjustSpinBox.setValue(0)
                 self.layout.addWidget(self.yAdjustSpinBox, 6, 3, 1, 1)
 
+                self.statusBox = QtGui.QLabel()
+                self.statusBox.setStyleSheet("color:blue;")
+                self.layout.addWidget(self.statusBox, 0,0,1,4)
+
 
                 self.addElementLabel = QtGui.QLabel("Add element:")
-                self.layout.addWidget(self.addElementLabel, 0, 0, 1, 1)
+                self.layout.addWidget(self.addElementLabel, 1, 0, 1, 1)
                 self.addElementComboBox = QtGui.QComboBox()
                 self.addElementComboBox.currentIndexChanged.connect(self.onAddElementComboBoxCurrentIndexChanged)
-                self.addElementComboBox.setEnabled(False)
-                self.elements = {"Clear Element field to enable":("",""), \
+                #self.addElementComboBox.setEnabled(False)
+                self.elements = {"Add an element (one per layer)":("","Items with () make use of points, right-click to add some -->\n" +\
+                                                                      "One element per layer, add a new layer to add more elements."), \
+                                "clear element box":("","Clears current element"), \
+                                "putpoints()":("putpoints()", "puts the construction points into the image as regular points"), \
                                 "text":("A","Just enter the text you want displayed"), \
-                                "circle":("circle(0,0,10)","circle(center_x, center_y, radius)"),\
-                                "ellipse":("ellipse(0,0,10,15,45)","ellipse(center_x, center_y, major_radius, minor_radius, angle)"), \
-                                "rectangle":("rectangle(0,0,63,63)","rectangle(top_left_x, top_left_y, bottom_right_x, bottom_right_y)"), \
-                                "polygon":("polygon(0,0,5,10,45)","polygon(center_x, center_y, number_sides, circumradius, angle)"), \
-                                "polyline":("polyline(0,0,25,0,42,42,0,37,0,0)","polyline(x1,y1, x2,y2, ... end with x1,y1 to close)"),\
-                                "line":("line(0,0,50,0)","line(x1,y1, x2,y2)")}
+                                "circle":("circle(32,32,10)","circle(center_x, center_y, radius)"),\
+                                "circle3points()":("circle3points()","circle3points() takes last 3 construction points and uses \n" +\
+                                                                     "them to find the circle that all 3 points lie on."), \
+                                "ellipse":("ellipse(32,32,10,15,45)","ellipse(center_x, center_y, major_radius, minor_radius, angle)"), \
+                                "ellipse5points()":("ellipse5points()","Draws the ellipse that the last 5 construction points lie on"), \
+                                "rectangle()":("rectangle()","rectangle(top_left_x, top_left_y, bottom_right_x, bottom_right_y)\n" +\
+                                                             "Last 2 points can be used to define top left and bottom right"), \
+                                "rectangles()":("rectangles()","Uses the points in pairs to make multiple rectangles.\n" +\
+                                                               "Tip: set color to black or white (thickness = -1 to fill) for erasers"),\
+                                "polygon":("polygon(32,32,5,10,45)","polygon(center_x, center_y, number_sides, circumradius, angle)"), \
+                                "polyline()":("polyline()","polyline(x1,y1, x2,y2, ... end with x1,y1 to close, thickness = -1 to fill)\n"+
+                                                           "Can use construction points to define the start and end points of the lines."),\
+                                "line()":("line()","line(x1,y1, x2,y2) or line() to use last 2 clicks"), \
+                                "arc": ("ellipse(20,30,10,10,0,90,180)","ellipse(center_x,center_y,major,minor,angle,startAngle,endAngle)"), \
+                                "arc3points()":("arc3points()","arc3points(), arc that passes through last 3 construction points"), \
+                                "arc3points2()":("arc3points2()","complementary arc to arc3points()"), \
+                                "floodfill()":("floodfill()","Right-click on the image, then enter floodfill() to seed the clicked point"), \
+                                "floodfillall()":("floodfillall(20)","Tip right-click on all the seed points, and then run this command")}
                 self.addElementComboBox.addItems(sorted(self.elements.keys()))
-                self.layout.addWidget(self.addElementComboBox, 0, 1, 1, 3)
+                self.layout.addWidget(self.addElementComboBox, 1, 1, 1, 3)
 
                 self.basePixmap = basePixmap
+                self.basePixmapMethod = None #options are None, ("system",system_name), ("style", style_name), ("file", file_path)
                 self.loadBaseButton = QtGui.QPushButton("Load base")
                 self.loadBaseButton.setToolTip("Load an image or select an icon to serve as the base for your icon")
                 self.loadBaseButton.clicked.connect(self.loadBaseButtonClicked)
-                self.layout.addWidget(self.loadBaseButton, 9, 5 , 1, 1)
+                #self.layout.addWidget(self.loadBaseButton, 9, 5 , 1, 1)
 
                 self.addLayerButton = QtGui.QPushButton("Add layer")
                 self.addLayerButton.setToolTip("Add another layer.  Each layer builds on top of the lower layers, one feature per layer")
                 self.addLayerButton.clicked.connect(self.onAddLayerButtonClicked)
-                self.layout.addWidget(self.addLayerButton, 9, 4, 1, 1)
+                #self.layout.addWidget(self.addLayerButton, 9, 4, 1, 1)
 
-                self.saveButton = QtGui.QPushButton("Export XPM")
-                self.saveButton.clicked.connect(self.saveImage)
-                self.saveButton.setToolTip("Puts the XPM string for this icon into the plain text area in the main dialog.")
-                self.layout.addWidget(self.saveButton, 10, 4, 1, 1)
+                # moved to menu for now, but save this in case we decide to put it back
+                # self.saveButton = QtGui.QPushButton("Export XPM")
+                # self.saveButton.clicked.connect(self.saveImage)
+                # self.saveButton.setToolTip("Puts the XPM string for this icon into the plain text area in the main dialog.")
+                # self.layout.addWidget(self.saveButton, 10, 4, 1, 1)
 
                 self.closeTabButton = QtGui.QPushButton("Close tab")
                 self.closeTabButton.setToolTip("Closes this layer.  (only top layer can be closed)")
                 self.closeTabButton.clicked.connect(self.onCloseTabButtonClicked)
-                self.layout.addWidget(self.closeTabButton, 10, 6, 1, 1)
+               # self.layout.addWidget(self.closeTabButton, 10, 6, 1, 1)
 
-                self.closeAllButton = QtGui.QPushButton("Close all layers")
-                self.closeAllButton.clicked.connect(self.closeAll)
-                self.closeAllButton.setToolTip("Closes this and all other layers")
-                self.layout.addWidget(self.closeAllButton, 10, 5, 1, 1)
+                # moved to menu for now
+                # self.closeAllButton = QtGui.QPushButton("Close all layers")
+                # self.closeAllButton.clicked.connect(self.closeAll)
+                # self.closeAllButton.setToolTip("Closes this and all other layers")
+                # self.layout.addWidget(self.closeAllButton, 10, 5, 1, 1)
 
-                self.flashButton = QtGui.QPushButton("Flash")
+                self.flashButton = QtGui.QPushButton("Flash layer")
                 self.flashButton.setToolTip("Flashes the element in the active layer")
                 self.flashButton.clicked.connect(self.onFlashButtonClicked)
-                self.layout.addWidget(self.flashButton, 9, 6, 1, 1)
+                self.layout.addWidget(self.flashButton, 10, 6, 1, 1)
+
+                self.pointsBox = EditableListWidget(self, self.pointsColor)
+                self.layout.addWidget(self.pointsBox, 7, 0, 3, 4)
 
                 self.iconLabel = QtGui.QLabel()
                 self.iconLabel.installEventFilter(self)
                 self.iconLabel.setObjectName("iconLabel")
                 self.iconLabel.setStyleSheet("background-color: lightgray;")
+                self.iconLabel.setContentsMargins(2,2,2,2)
                 self.iconLabel.setAlignment(QtCore.Qt.AlignCenter)
+                self.iconLabel.setToolTip("Right click to add construction point")
+                self.iconLabel.setSizePolicy(QtGui.QSizePolicy.MinimumExpanding, QtGui.QSizePolicy.MinimumExpanding)
+                self.layout.addWidget(self.iconLabel, 0, 4, 10, 3)
                 self.pixmap = None
                 self.updateImage()
 
-                self.layout.addWidget(self.iconLabel, 0, 4, 9, 3)
-
                 self.whiteToTransparentCheckBox = QtGui.QCheckBox()
                 self.whiteToTransparentCheckBox.setText("White -> Transparent")
-                self.whiteToTransparentCheckBox.setToolTip("Applied when the XPM string is exported")
+                self.whiteToTransparentCheckBox.setToolTip("Applied when the icon is exported")
                 self.blackToTransparentCheckBox = QtGui.QCheckBox()
                 self.blackToTransparentCheckBox.setText("Black -> Transparent")
-                self.blackToTransparentCheckBox.setToolTip("Applied when the XPM string is exported")
+                self.blackToTransparentCheckBox.setToolTip("Applied when the icon is exported")
                 self.whiteToTransparentCheckBox.setChecked(True)
                 self.blackToTransparentCheckBox.setChecked(True)
-                self.layout.addWidget(self.whiteToTransparentCheckBox, 9, 0, 1, 2)
+                self.layout.addWidget(self.whiteToTransparentCheckBox, 10, 2, 1, 2)
                 self.layout.addWidget(self.blackToTransparentCheckBox, 10, 0, 1, 2)
+
+                self.pointsBox.showPoints()
+                self.setupMenu()
+
+                # moved to menu
+                # self.loadProjectButton = QtGui.QPushButton("Load project")
+                # self.loadProjectButton.clicked.connect(self.loadProjectButtonClicked)
+                # self.layout.addWidget(self.loadProjectButton, 10,2,1,1)
+                #
+                # self.saveProjectButton = QtGui.QPushButton("Save project")
+                # self.saveProjectButton.clicked.connect(self.saveProjectButtonClicked)
+                # self.layout.addWidget(self.saveProjectButton, 10,3,1,1)
+
+            def onTabWidgetCurrentChanged(self, idx):
+                if idx == 0:
+                    count = self.tabWidget.count()
+                    iconMaker = self.tabWidget.widget(count-1)
+                    iconMaker.onAddLayerButtonClicked()
+
+
+            def setupMenu(self):
+                """make the menus"""
+
+                #File
+                loadProjectAction = QtGui.QAction("Load project", self.fileMenu)
+                loadProjectAction.triggered.connect(self.loadProjectButtonClicked)
+                self.fileMenu.addAction(loadProjectAction)
+
+                saveProjectAction = QtGui.QAction("Save project", self.fileMenu)
+                saveProjectAction.triggered.connect(self.saveProjectButtonClicked)
+                self.fileMenu.addAction(saveProjectAction)
+
+                loadBaseAction = QtGui.QAction("Load base pixmap", self.fileMenu)
+                loadBaseAction.triggered.connect(self.loadBaseButtonClicked)
+                self.fileMenu.addAction(loadBaseAction)
+
+
+                exportXPMAction = QtGui.QAction("Export XPM", self.fileMenu)
+                exportXPMAction.triggered.connect(self.saveImage)
+                self.fileMenu.addAction(exportXPMAction)
+
+                exportPNGAction = QtGui.QAction("Export PNG", self.fileMenu)
+                exportPNGAction.triggered.connect(self.exportPNG)
+                self.fileMenu.addAction(exportPNGAction)
+
+                exportSVGAction = QtGui.QAction("Export SVG", self.fileMenu)
+                exportSVGAction.triggered.connect(self.exportSVG)
+                self.fileMenu.addAction(exportSVGAction)
+
+
+                self.fileMenu.addSeparator()
+                closeAllAction = QtGui.QAction("Quit", self.fileMenu)
+                closeAllAction.triggered.connect(self.closeAll)
+                self.fileMenu.addAction(closeAllAction)
+
+                #Layers
+
+                closeTabAction = QtGui.QAction("Close top layer", self.layerMenu)
+                closeTabAction.triggered.connect(self.onCloseTabButtonClicked)
+                self.layerMenu.addAction(closeTabAction)
+
+                addLayerAction = QtGui.QAction("Add layer", self.layerMenu)
+                addLayerAction.triggered.connect(self.onAddLayerButtonClicked)
+                self.layerMenu.addAction(addLayerAction)
+
+                refreshAction = QtGui.QAction("Recompute layer", self.layerMenu)
+                refreshAction.triggered.connect(self.updateImage)
+                self.layerMenu.addAction(refreshAction)
+                self.recomputeButton.clicked.connect(self.updateImage)
+
+                #Points
+                clearPointsAction = QtGui.QAction("Clear points", self.pointsMenu)
+                clearPointsAction.triggered.connect(self.pointsBox.onClearButtonClicked)
+                self.pointsMenu.addAction(clearPointsAction)
+
+                removePointAction = QtGui.QAction("Remove selected point", self.pointsMenu)
+                removePointAction.triggered.connect(self.pointsBox.onRemovePointButtonClicked)
+                self.pointsMenu.addAction(removePointAction)
+
+                duplicatePointAction = QtGui.QAction("Duplicated selected point", self.pointsMenu)
+                duplicatePointAction.triggered.connect(self.pointsBox.duplicatePointTriggered)
+                self.pointsMenu.addAction(duplicatePointAction)
+
+                showPointsAction = QtGui.QAction("Show points (boolean)", self.pointsMenu)
+                showPointsAction.setCheckable(True)
+                showPointsAction.setChecked(True)
+                showPointsAction.setObjectName("showPointsAction")
+                showPointsAction.toggled.connect(self.pointsBox.showPointsToggled)
+                self.pointsMenu.addAction(showPointsAction)
+
+                transformPointsAction = QtGui.QAction("Apply transformation to points", self.pointsMenu)
+                transformPointsAction.triggered.connect(self.pointsBox.transformPointsTriggered)
+                self.pointsMenu.addAction(transformPointsAction)
+                self.transformPointsButton.clicked.connect(self.pointsBox.transformPointsTriggered)
+
+                backupPointsAction = QtGui.QAction("Backup points in memory", self.pointsMenu)
+                backupPointsAction.triggered.connect(self.pointsBox.backupPointsTriggered)
+                self.pointsMenu.addAction(backupPointsAction)
+
+                restorePointsAction = QtGui.QAction("Restore points from memory", self.pointsMenu)
+                restorePointsAction.triggered.connect(self.pointsBox.restorePointsTriggered)
+                self.pointsMenu.addAction(restorePointsAction)
+
+                copyPointsAction = QtGui.QAction("Copy points to clipboard", self.pointsMenu)
+                copyPointsAction.triggered.connect(self.pointsBox.copyPointsTriggered)
+                self.pointsMenu.addAction(copyPointsAction)
+
+                pastePointsAction = QtGui.QAction("Paste points from clipboard", self.pointsMenu)
+                pastePointsAction.triggered.connect(self.pointsBox.pastePointsTriggered)
+                self.pointsMenu.addAction(pastePointsAction)
+
+                importDiscretizedEdgesAction = QtGui.QAction("Import discretized edges of object", self.pointsMenu)
+                importDiscretizedEdgesAction.triggered.connect(self.pointsBox.importDiscretizedEdgesTriggered)
+                self.pointsMenu.addAction(importDiscretizedEdgesAction)
+
+                importVerticesAction = QtGui.QAction("Import selected vertices", self.pointsMenu)
+                importVerticesAction.triggered.connect(self.pointsBox.importVerticesTriggered)
+                self.pointsMenu.addAction(importVerticesAction)
+
+                geometryFromSketchAction = QtGui.QAction("Geometry from sketch", self.pointsMenu)
+                geometryFromSketchAction.triggered.connect(self.pointsBox.geometryFromSketchTriggered)
+                #self.pointsMenu.addAction(geometryFromSketchAction)
+                self.importSketchButton.clicked.connect(self.pointsBox.geometryFromSketchTriggered)
+
+                savePointsAction = QtGui.QAction("Save points", self.pointsMenu)
+                savePointsAction.triggered.connect(self.pointsBox.savePointsTriggered)
+                self.pointsMenu.addAction(savePointsAction)
+
+                loadPointsAction = QtGui.QAction("Load points", self.pointsMenu)
+                loadPointsAction.triggered.connect(self.pointsBox.loadPointsTriggered)
+                self.pointsMenu.addAction(loadPointsAction)
+
+                #settings
+                fontMenu = QtGui.QMenu("Font")
+                self.settingsMenu.addMenu(fontMenu)
+
+                fontActionGroup = QtGui.QActionGroup(self)
+                fontActionGroup.triggered.connect(self.onFontMenuAction)
+                for k,v in self.fonts.items():
+                    option = QtGui.QAction(k, self)
+                    option.setCheckable(True)
+                    fontActionGroup.addAction(option)
+                    fontMenu.addAction(option)
+                    if k == "HERSHEY_SIMPLEX":
+                        option.setChecked(True)
+
+                lineTypeMenu = QtGui.QMenu("Line type")
+                self.settingsMenu.addMenu(lineTypeMenu)
+
+                lineTypeActionGroup = QtGui.QActionGroup(self)
+                lineTypeActionGroup.triggered.connect(self.onLineTypeMenuAction)
+                for k,v in self.lineTypes.items():
+                    option = QtGui.QAction(k, self)
+                    option.setCheckable(True)
+                    lineTypeActionGroup.addAction(option)
+                    lineTypeMenu.addAction(option)
+                    if k == "cv2.LINE_AA":
+                        option.setChecked(True)
+            def onLineTypeMenuAction(self, action):
+                self.lineTypeBox.setCurrentText(action.text())
+
+            def onFontMenuAction(self,action):
+                self.fontBox.setCurrentText(action.text())
+
+            def loadProject(self):
+                data = self.load_dict_from_json()
+                if not data:
+                    return
+                #first close all tabs except this one
+                children = []
+                child = self.childDlg
+                while child:
+                    children.append(child)
+                    child = child.childDlg
+                for child in children:
+                    child.onCloseTabButtonClicked()
+                if self.childDlg:
+                    self.childDlg.onCloseTabButtonClicked()
+
+                self.putSerializingData(data["1"])
+                print(f"data.keys(): {data.keys()}")
+                if len(data)>1:
+                    self.onAddLayerButtonClicked()
+                    child = self.childDlg
+                for ii in range(len(data)-2):
+                    child.onAddLayerButtonClicked()
+                    child = child.childDlg
+
+                children = []
+                child = self.childDlg
+                while child:
+                    children.append(child)
+                    child = child.childDlg
+                for child in children:
+                    key = str(child.layer)
+                    if key in data.keys():
+                        child.putSerializingData(data[key])
+                        child.updateImage()
+
+            def saveProject(self):
+                data = {}
+                children = [self]
+                child = self.childDlg
+                while child:
+                    children.append(child)
+                    child = child.childDlg
+                for child in children:
+                    data[child.layer] = child.getSerializingData()
+                self.save_dict_to_json(data)
+
+            def load_dict_from_json(self):
+                options = QtGui.QFileDialog.Options()
+                file_name, ok = QtGui.QFileDialog.getOpenFileName(None, "Open JSON File",\
+                            "", "JSON Files (*.json);;All Files (*)", options=options)
+
+                if file_name:
+                    try:
+                        with open(file_name, 'r') as file:
+                            dict_data = json.load(file)
+                        print(f"Dictionary loaded from {file_name}")
+                        return dict_data
+                    except Exception as e:
+                        print(f"Error loading JSON file: {str(e)}")
+                else:
+                    return None
+
+            def save_dict_to_json(self, dict_data):
+                options = QtGui.QFileDialog.Options()
+                file_name, ok = QtGui.QFileDialog.getSaveFileName(None, "Save JSON File", "", \
+                        "JSON Files (*.json);;All Files (*)", options=options)
+
+                if file_name:
+                    try:
+                        with open(file_name, 'w') as file:
+                            json.dump(dict_data, file, indent=4)
+                        print(f"Dictionary saved to {file_name}")
+                    except Exception as e:
+                        print(f"Error saving JSON file: {str(e)}")
+
+            def loadProjectButtonClicked(self):
+                print(f"this is layer{self.layer}, but we are calling layer 1 dialog loadProject() function")
+                self.cte.iconMakerDlg.loadProject()
+
+            def saveProjectButtonClicked(self):
+                self.cte.iconMakerDlg.saveProject()
+
+            def getSerializingData(self):
+                """return a dictionary of information needed to restore this dialog"""
+                data = {}
+                data["layer"] = self.layer
+                data["seed_x"] = self.seed_x
+                data["seed_y"] = self.seed_y
+                data["zoomFactor"] = self.zoomFactor
+                data["textEdit"] = self.textEdit.text()
+                data["fontBox"] = self.fontBox.currentText()
+                data["lineTypeBox"] = self.lineTypeBox.currentText()
+                data["color"] = self.getColor()
+                data["borderColor"] = self.getBorderColor()
+                data["scaleSpinBox"] = self.scaleSpinBox.value()
+                data["angleAdjust"] = self.angleAdjustSpinBox.value()
+                data["thickness"] = self.thicknessSpinBox.value()
+                data["borderThickness"] = self.borderThicknessSpinBox.value()
+                data["xAdjust"] = self.xAdjustSpinBox.value()
+                data["yAdjust"] = self.yAdjustSpinBox.value()
+                data["basePixmapMethod"] = self.basePixmapMethod
+                data["pointsBox"] = self.pointsBox.getPoints()
+                data["pointsColor"] = self.pointsColor
+                data["pointsBoxBackupPoints"] = self.pointsBox.backupPoints
+                data["whiteToTransparent"] = self.whiteToTransparentCheckBox.isChecked()
+                data["blackToTransparent"] = self.blackToTransparentCheckBox.isChecked()
+                return data
+
+            def putSerializingData(self, data):
+                self.layer = data["layer"]
+                self.seed_x = data["seed_x"]
+                self.seed_y = data["seed_y"]
+                self.zoomFactor = data["zoomFactor"]
+                self.textEdit.setText(data["textEdit"])
+                self.fontBox.setCurrentText(data["fontBox"])
+                self.lineTypeBox.setCurrentText(data["lineTypeBox"])
+                #print(f"data['color']: {data['color']}")
+                self.setColor(data["color"])
+                self.setBorderColor(data["borderColor"])
+                self.scaleSpinBox.setValue(data["scaleSpinBox"])
+                self.angleAdjustSpinBox.setValue(data["angleAdjust"])
+                self.thicknessSpinBox.setValue(data["thickness"])
+                self.borderThicknessSpinBox.setValue(data["borderThickness"])
+                self.xAdjustSpinBox.setValue(data["xAdjust"])
+                self.yAdjustSpinBox.setValue(data["yAdjust"])
+                self.basePixmapMethod = data["basePixmapMethod"]
+                if self.basePixmapMethod:
+                    method,value = self.basePixmapMethod
+                    if method == "file":
+                        self.basePixmap = QtGui.QPixmap(value)
+                    elif method == "style":
+                        icon = self.style().standardIcon(value)
+                        self.basePixmap = icon.pixmap(64,64)
+                    elif method == "system":
+                        icon = QtGui.QIcon(FreeCADGui.getIcon(value))
+                        self.basePixmap = icon.pixmap(64,64)
+                    self.updateImage()
+                self.pointsBox.addPoints(data["pointsBox"])
+                self.pointsBox.setColor(data["pointsColor"])
+                self.pointsBox.backupPoints = data["pointsBoxBackupPoints"]
+                self.whiteToTransparentCheckBox.setChecked(data["whiteToTransparent"])
+                self.blackToTransparentCheckBox.setChecked(data["blackToTransparent"])
+
+
+            def showPoints(self, pts, color):
+                """put the points in a temporary pixmap, a copy of the current layer's pixmap, and display the temporary pixmap"""
+                base_image = self.pixmap.toImage()
+
+                # Convert the QImage to a numpy array, because cv2 needs it in that format
+                width, height = base_image.width(), base_image.height()
+                format = base_image.format()
+
+                if format == 3:  # RGB format (3 bytes per pixel)
+                    image_array = np.frombuffer(base_image.constBits(), dtype=np.uint8).reshape((height, width, 3))
+                elif format == 4 or format == QtGui.QImage.Format.Format_ARGB32_Premultiplied:  # RGBA format (4 bytes per pixel)
+                    image_array = np.frombuffer(base_image.constBits(), dtype=np.uint8).reshape((height, width, 4))
+
+                if image_array is not None:
+                    if format == 4 or format == QtGui.QImage.Format.Format_ARGB32_Premultiplied:  # ARGB or ARGB_Premultiplied to BGR
+                        temp_image = cv2.cvtColor(image_array, cv2.COLOR_RGBA2BGR)
+                    elif format == 3:  # RGB to BGR
+                        temp_image = cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
+                    temp_image = cv2.resize(temp_image, (64,64)) #to fit label
+                for pt in pts:
+                    #pt = (self.seed_x,self.seed_y)
+                    cv2.polylines(temp_image, [np.array([pt,pt])], isClosed = False, thickness = 1, color=color)
+                h, w, ch = temp_image.shape
+                bytes_per_line = ch * w
+                q_image = QtGui.QImage(temp_image.data, w, h, bytes_per_line, QtGui.QImage.Format_RGB888)
+                temp_pixmap = QtGui.QPixmap.fromImage(q_image)
+                scaledPixmap = temp_pixmap.scaled(64*self.zoomFactor, 64*self.zoomFactor,\
+                                QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+                self.iconLabel.setPixmap(scaledPixmap)
+
+            def flashFloodfillPosition(self):
+                """called from makeImage() when it's doing a floodfill()"""
+                flashing_color = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]
+                flashes = 1
+                sleepTime = .125
+
+                for ii in range(flashes):
+                    # Flash the seed point
+                    for color in flashing_color:
+                        self.showPoints([(self.seed_x,self.seed_y)], color)
+                        time.sleep(sleepTime)
+                        FreeCADGui.updateGui()
+                        scaledPixmap = self.pixmap.scaled(64*self.zoomFactor, 64*self.zoomFactor,\
+                                QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+                        self.iconLabel.setPixmap(scaledPixmap) #back to original image
+
 
             def onFlashButtonClicked(self):
                 """flash the current layer's element off and on a few times"""
                 backup = self.textEdit.text()
+                if "floodfill(" in backup:
+                    self.flashFloodfillPosition()
+                    return
                 flashes = 3
                 sleepTime = .125
+
                 for ii in range(flashes):
                     self.textEdit.setText("")
                     time.sleep(sleepTime)
@@ -444,13 +1472,20 @@ class CustomToolbarEditor(QtGui.QWidget):
 
 
             def onAddElementComboBoxCurrentIndexChanged(self):
+
+                currentValue = self.addElementComboBox.currentText()
+                elementToAdd = self.elements[currentValue]
                 if self.addElementComboBox.currentIndex() == 0:
+                    self.statusBox.setText(elementToAdd[1])
                     return
                 currentValue = self.addElementComboBox.currentText()
                 elementToAdd = self.elements[currentValue]
                 self.textEdit.setText(elementToAdd[0])
-                self.cte.showMsg(elementToAdd[1])
+                self.textEdit.setToolTip(elementToAdd[1])
+                self.statusBox.setText(elementToAdd[1])
+                self.addElementComboBox.blockSignals(True)
                 self.addElementComboBox.setCurrentIndex(0)
+                self.addElementComboBox.blockSignals(False)
                 self.updateImage()
 
 
@@ -461,21 +1496,32 @@ class CustomToolbarEditor(QtGui.QWidget):
                             hasattr(self, "xAdjustSpinBox") and hasattr(self, "yAdjustSpinBox") and \
                             hasattr(self, "addElementComboBox") and hasattr(self, "angleAdjustSpinBox")):
                     return
-                if not self.textEdit.text():
-                    self.addElementComboBox.setEnabled(True)
-                else:
-                    self.addElementComboBox.setEnabled(False)
+
                 self.pixmap = self.makeImage(self.textEdit.text() ,self.scaleSpinBox.value(), \
                               self.thicknessSpinBox.value(), self.getColor(), (255,255,255), \
                               self.getBorderColor(), self.borderThicknessSpinBox.value())
-                scaledPixmap = self.pixmap.scaled(256, 256, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+                scaledPixmap = self.pixmap.scaled(64*self.zoomFactor, 64*self.zoomFactor, \
+                                QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
                 self.iconLabel.setPixmap(scaledPixmap)
+                self.pointsBox.showPoints()
 
                 #we have a child dialog if there is another layer following this one
                 #inform next layer it needs to update, ensure this layer is that layer's base image
                 if self.childDlg:
                     self.childDlg.basePixmap = self.pixmap
                     self.childDlg.updateImage()
+
+            def setColor(self, colorTuple):
+                r,g,b,a = colorTuple
+                color = QtGui.QColor(r,g,b,a)
+                colorString = f'rgb({color.red()}, {color.green()}, {color.blue()})'
+                self.colorButton.setStyleSheet(f'background-color: {colorString};')
+
+            def setBorderColor(self, colorTuple):
+                r,g,b,a = colorTuple
+                color = QtGui.QColor(r,g,b,a)
+                colorString = f'rgb({color.red()}, {color.green()}, {color.blue()})'
+                self.borderColorButton.setStyleSheet(f'background-color: {colorString};')
 
             def getColor(self):
                 """gets the current color of the color button, returns as (r,g,b,a) each a value from 0 to 255"""
@@ -494,26 +1540,39 @@ class CustomToolbarEditor(QtGui.QWidget):
             def onAddLayerButtonClicked(self):
                 """Opens a new tab with the current image as a base for the new image"""
                 self.childDlg = SimpleIconMaker(self.cte, self.pixmap, layer=self.layer+1, parentDlg = self, tabWidget = self.tabWidget)
-                #disable adding new layers since now there exists a layer atop this layer
-                self.addLayerButton.setEnabled(False)
-                #only layer1 can use a base image, or else it would cover previous layers
-                self.childDlg.loadBaseButton.setEnabled(False)
-                #disable closing this layer if there is another layer on top of it, user can empty Element, if desired
-                self.closeTabButton.setEnabled(False)
+                self.childDlg.setColor(self.getColor())
+                self.childDlg.setBorderColor(self.getBorderColor())
+                self.childDlg.pointsBox.setColor(self.pointsColor)
+                self.childDlg.zoomFactor = self.zoomFactor
+                self.childDlg.updateImage()
                 self.tabWidget.addTab(self.childDlg, f"Layer{self.layer+1}")
                 self.tabWidget.setCurrentWidget(self.childDlg)
                 self.childDlg.show()
                 return
 
+            def enableAction(self, menu, actionText, bEnable):
+                """enable or disable an action in the menu"""
+                actions = menu.actions()
+                for action in actions:
+                    if action.text() == actionText:
+                        action.setEnabled(bEnable)
+                        break
+
             def onCloseTabButtonClicked(self):
-                self.tabWidget.removeTab(self.layer-1)
+                count = self.tabWidget.count()
+                lastTab = self.tabWidget.widget(count-1)
+                if count >2:
+                    lastTab.close()
+                    self.tabWidget.removeTab(count-1)
                 #top layer's parent will be None since there is no layer below it
-                if hasattr(self.parentDlg,"addLayerButton"):
+                if hasattr(lastTab.parentDlg,"addLayerButton"):
                     #we're closing this top layer, so re-enable the next lower level's add layer button
-                    self.parentDlg.addLayerButton.setEnabled(True)
+                    #lastTab.parentDlg.addLayerButton.setEnabled(True)
+                    #lastTab.parentDlg.enableAction(layerMenu,"Add layer tab", True)
+                    pass
                 else:
                     self.closeAll() #closing layer1, so close everything.
-                self.close()
+                #lastTab.close()
 
             def closeAll(self):
                 """closes and deletes all layers and the tab widget"""
@@ -547,15 +1606,20 @@ class CustomToolbarEditor(QtGui.QWidget):
                 #own childDlg and it's child's parentDlg to its own parentDlg
                 if not self.closingAll:
                     if self.parentDlg:
-                        self.parentDlg.closeTabButton.setEnabled(True)
+                        # self.parentDlg.closeTabButton.setEnabled(True)
+                        # self.parentDlg.enableAction("Close layer tab", True)
+                        pass
                         if self.childDlg:
                             self.parentDlg.childDlg = self.childDlg
                             self.childDlg.parentDlg = self.parentDlg
                             self.parentDlg.updateImage()
                             self.childDlg.updateImage()
                             if self.layer != 1:
-                                self.parentDlg.closeTabButton.setEnabled(True)
-                            self.parentDlg.addLayerButton.setEnabled(True)
+                                # self.parentDlg.closeTabButton.setEnabled(True)
+                                # self.parentDlg.enableAction("Close layer tab",True)
+                                pass
+                            # self.parentDlg.addLayerButton.setEnabled(True)
+                            # self.parentDlg.enableAction("Add layer tab", True)
                             #print(f"Deleting layer: {self.layer}")
                             self.deleteLater()
                     #since not all tabs are closing we ignore the
@@ -564,10 +1628,101 @@ class CustomToolbarEditor(QtGui.QWidget):
                 else:
                     #everything is closing, so propage the event up the chain
                     super().closeEvent(event)
+            @property
+            def lastClicks(self):
+                return self.pointsBox.getPoints()
+
+            @lastClicks.setter
+            def lastClicks(self, pts):
+                self.pointsBox.addPoints(pts)
+                self.pointsBox.showPoints()
+
+            def exportSVG(self):
+                """first we make it ionto the xpm with transparent background, then make a pixmap
+                   back out of the xpm and use that to export to svg"""
+                image = self.pixmap.toImage()
+                buffer = QtCore.QBuffer()
+                buffer.open(QtCore.QBuffer.ReadWrite)
+                image.save(buffer, "XPM")
+                xpm_data_bytes = buffer.data()
+
+                # Convert the bytes to a string so we can replace white and black with transparency
+                xpm_string = xpm_data_bytes.data().decode('utf-8')
+                if self.whiteToTransparentCheckBox.isChecked():
+                    xpm_string = xpm_string.replace("#ffffff", "None")
+                if self.blackToTransparentCheckBox.isChecked():
+                    xpm_string = xpm_string.replace("#000000", "None")
+
+                #then back to a buffer for loading into the QImage
+
+                buffer2 = QtCore.QBuffer()
+                buffer2.open(QtCore.QBuffer.ReadWrite)
+                buffer2.write(QtCore.QByteArray(xpm_string.encode()))
+                xpm_data_bytes = buffer2.data()
+
+                image = QtGui.QImage()
+                image.loadFromData(xpm_data_bytes)
+
+                iconFolders = self.cte.getIconFolders()
+                if iconFolders:
+                    default_folder = iconFolders[0]
+                else:
+                    default_folder = FreeCAD.getUserMacroDir(True)
+
+                file_dialog = QtGui.QFileDialog()
+                file_dialog.setDefaultSuffix("svg")
+                filename, ok = file_dialog.getSaveFileName(None, \
+                        "Export Image, must be saved to a file to get the text into the extracted box",\
+                        default_folder, "SVG Files (*.svg);;All Files (*)")
+
+                if filename:
+                    svg_generator = QtSvg.QSvgGenerator()
+                    svg_generator.setFileName(filename)
+                    svg_generator.setSize(image.size())
+                    svg_generator.setViewBox(image.rect())
+
+                    painter = QtGui.QPainter(svg_generator)
+                    painter.drawImage(0, 0, image)  # Draw the QImage onto the SVG
+                    painter.end()
+
+                    with open(filename, 'r') as file:
+                        svg_string = file.read()
+
+                    self.cte.form.PlainTextEditExtracted.setPlainText(svg_string)
+                    self.cte.form.saveExtractedButton.setEnabled(True)
+
+            def exportPNG(self):
+                """export current layer as PNG file"""
+
+                # Convert the pixmap to a 32-bit image with an alpha channel
+                image = QtGui.QImage(self.pixmap.size(), QtGui.QImage.Format_ARGB32)
+                image.fill(QtGui.QColor(0, 0, 0, 0))  # Fill the image with transparent
+
+                replaceWhite = self.whiteToTransparentCheckBox.isChecked()
+                replaceBlack = self.blackToTransparentCheckBox.isChecked()
+
+                # Loop through the pixmap and replace white and black pixels with transparent pixels
+                for x in range(self.pixmap.width()):
+                    for y in range(self.pixmap.height()):
+                        color = self.pixmap.toImage().pixel(x, y)
+                        if QtGui.QColor(color) == QtGui.QColor(255, 255, 255) and replaceWhite:  # Replace white
+                            image.setPixel(x, y, QtGui.QColor(0, 0, 0, 0).rgba())
+                        elif QtGui.QColor(color) == QtGui.QColor(0, 0, 0) and replaceBlack:  # Replace black
+                            image.setPixel(x, y, QtGui.QColor(0, 0, 0, 0).rgba())
+                        else:
+                            image.setPixel(x, y, color)
+                file_dialog = QtGui.QFileDialog()
+                file_dialog.setDefaultSuffix("png")
+                filename, ok = file_dialog.getSaveFileName(None, "Export Image", "", "PNG Files (*.png);;All Files (*)")
+
+                if filename:
+                    image.save(filename, "PNG")
+
+
 
             def loadBaseButtonClicked(self):
                 """Now Load base button, loads an image file to use as base icon"""
-
+                firstTab = self.tabWidget.widget(1)
                 parseMod = self.cte.getBool("ParseModFolder",False)
                 w = SystemIconSelector(parseModFolder = parseMod, cte=self.cte, bShowBrowseButton = True, bShowStyleIcons = True)
                 w.setModal(True)
@@ -579,13 +1734,15 @@ class CustomToolbarEditor(QtGui.QWidget):
                 if result and bUseStyle:
                     pixmapi = getattr(QtGui.QStyle, result)
                     icon = self.style().standardIcon(pixmapi)
-                    self.basePixmap = icon.pixmap(64,64)
-                    self.updateImage()
+                    firstTab.basePixmap = icon.pixmap(64,64)
+                    firstTab.updateImage()
+                    firstTab.basePixmapMethod = ("style", pixmapi)
                     return
                 elif result and not bUseStyle:
                     icon = QtGui.QIcon(FreeCADGui.getIcon(result))
-                    self.basePixmap = icon.pixmap(64,64)
-                    self.updateImage()
+                    firstTab.basePixmap = icon.pixmap(64,64)
+                    firstTab.updateImage()
+                    firstTab.basePixmapMethod = ("system", result)
 
                 elif bLoadFromDisk:
                     iconFolders = self.cte.getIconFolders()
@@ -598,15 +1755,18 @@ class CustomToolbarEditor(QtGui.QWidget):
                     dlg.setFileMode(QtGui.QFileDialog.ExistingFile)
                     if dlg.exec_():
                         filename = dlg.selectedFiles()[0]
-                        self.basePixmap = QtGui.QPixmap(filename)
-                        self.updateImage()
+                        firstTab.basePixmap = QtGui.QPixmap(filename)
+                        firstTab.updateImage()
+                        firstTab.basePixmapMethod = ("file", filename)
                     else:
-                        self.basePixmap = None
-                        self.updateImage()
+                        firstTab.basePixmap = None
+                        firstTab.updateImage()
+                        firstTab.basePixmapMethod = None
                         return
                 else:
-                    self.basePixmap = None
-                    self.updateImage()
+                    firstTab.basePixmap = None
+                    firstTab.updateImage()
+                    firstTab.basePixmapMethod = None
                     return
 
             def onBorderColorButtonClicked(self):
@@ -652,34 +1812,73 @@ class CustomToolbarEditor(QtGui.QWidget):
                    the curent layer.  For the tab widget we detect when it is
                    being closed and delete all the layer dialogs in that case
                 """
-                if obj == self.iconLabel and event.type() == event.Wheel:
-                    # Adjust the scale factor based on the mouse wheel
+
+                if hasattr(obj, "iconLabel") and obj == self.iconLabel and event.type() == event.Wheel:
+                    modifiers = QtGui.QApplication.keyboardModifiers()
+                    if modifiers == QtCore.Qt.ControlModifier:
+                        zoom = True #change zoom
+                    else:
+                        zoom = False #change scale
+                    # Adjust the scale or zoom factor based on the mouse wheel
                     angle = event.angleDelta().y()
                     scale_factor = 1.1 if angle > 0 else 1 / 1.1
-                    scale = self.scaleSpinBox.value()
-                    scale *= scale_factor
-                    self.scaleSpinBox.setValue(scale)
-                    return True
+                    if not zoom:
+                        scale = self.scaleSpinBox.value()
+                        scale *= scale_factor
+                        self.scaleSpinBox.setValue(scale)
+                    else:
+                        if scale_factor > 1:
+                            self.zoomFactor += 1
+                        else:
+                            self.zoomFactor -= 1
+                            if self.zoomFactor <= 1:
+                                self.zoomFactor = 1
+                        self.updateImage()
+                        self.statusBox.setText(f"Zoom: {self.zoomFactor} (default = 4)")
+                    return super().eventFilter(obj, event)
                 if obj == self.iconLabel:
                     if event.type() == event.MouseButtonPress:
                         if event.button() == QtCore.Qt.LeftButton:
                             self.dragging = True
                             self.start_pos = event.pos()
+
                             self.iconLabel.setCursor(QtGui.QCursor(QtCore.Qt.ClosedHandCursor))
-                            return True  # Consume the event
+                            #return True  # Consume the event
+                            return super().eventFilter(obj, event)
+                        elif event.button() == QtCore.Qt.RightButton:
+                            # Get the size of the image
+                            image_width = self.pixmap.width() #always 64,64
+                            image_height = self.pixmap.height()
+                            # Get the size of the QLabel
+                            label_width = self.iconLabel.width() // self.zoomFactor
+                            label_height = self.iconLabel.height() //self.zoomFactor
+
+                            # Calculate the margin
+                            x_margin = (label_width - image_width) // 2
+                            y_margin = (label_height - image_height) // 2
+                            # Calculate the mouse coordinates in the image's coordinate system
+                            posX = event.pos().x() //self.zoomFactor - x_margin
+                            posY = event.pos().y() //self.zoomFactor - y_margin
+
+                            self.lastClicks = [(posX,posY)] + self.lastClicks #[0] is most recent, [1] was previous click
+                            self.pointsBox.showPoints()
+                            self.iconLabel.setToolTip("") #gets annoying and in the way at times
+                            return super().eventFilter(obj, event)
                     elif event.type() == event.MouseMove:
+
                         if self.dragging and self.start_pos is not None:
                             delta = event.pos() - self.start_pos
                             self.xAdjustSpinBox.setValue(self.xAdjustSpinBox.value() + delta.x())
                             self.yAdjustSpinBox.setValue(self.yAdjustSpinBox.value() + delta.y())
                             self.start_pos = event.pos()
-                            return True  # Consume the event
                     elif event.type() == event.MouseButtonRelease:
                         if event.button() == QtCore.Qt.LeftButton:
                             self.dragging = False
                             self.start_pos = None
                             self.iconLabel.setCursor(QtGui.QCursor(QtCore.Qt.ArrowCursor))
-                            return True  # Consume the event
+                            return super().eventFilter(obj, event)  # Consume the event
+
+
                 if obj == self.tabWidget and event.type() == QtCore.QEvent.Type.Close:
                     if not self.parentDlg: #this is layer 1
                         self.closeAll()
@@ -739,6 +1938,122 @@ class CustomToolbarEditor(QtGui.QWidget):
                 else:
                     return None
 
+            def floodfillAuto_to_floodfill(self, text):
+                """convenience function for user to use the last click position to determine where to
+                seed the floodfill() function"""
+                floodfillAutoPattern = r"floodfill\((\d*)\)"
+                floodfillAutoMatch = re.search(floodfillAutoPattern, text.lower().replace(" ",""))
+                if floodfillAutoMatch:
+                    if floodfillAutoMatch.group(1):
+                        tol = int(floodfillAutoMatch.group(1))
+                    else:
+                        tol = 20
+                    x, y = self.lastClicks[0] if self.lastClicks else (32,32)
+                    return f"floodfill({x},{y},{tol})"
+                return None
+
+            def lineAuto_to_line(self,text):
+                """convenience function for user to use the last click positions to determine how to fill out the line() function"""
+                if text.lower().replace(" ","").startswith("line()") and len(self.lastClicks) >= 2:
+                    x1,y1 = self.lastClicks[0]
+                    x2,y2 = self.lastClicks[1]
+                    return f"line({x2},{y2},{x1},{y1})"
+                else:
+                    return None
+                return None
+
+            def find_circle_from_points(self, point1, point2, point3):
+                """find the circle from 3 given points on the perimeter"""
+
+                def dist(p1,p2):
+                    x1,y1 = p1
+                    x2,y2 = p2
+                    return math.sqrt((x2-x1)**2 + (y2-y1)**2)
+
+                def midpoint(A, B):
+                    """ midpoint(A, B)
+                        A,B are vectors, return midpoint"""
+                    mid = FreeCAD.Base.Vector()
+                    mid.x = (A.x + B.x)/2.0
+                    mid.y = (A.y + B.y)/2.0
+                    mid.z = (A.z + B.z)/2.0
+                    return mid
+
+                def outerradius(a, b, c):
+                    """ helper for circumcenter()"""
+                    return (a*b*c) / (4*sss_area(a,b,c))
+
+                def sss_area(a,b,c): #semiperimeter
+                    """ helper for circumcenter()"""
+                    sp = (a+b+c)*0.5;
+                    return math.sqrt(sp*(sp-a)*(sp-b)*(sp-c))
+
+                def circumcenter(A,B,C):
+                    """ circumcenter(A, B, C)
+                        return the circumcenter of triangle A,B,C
+                        the circumcenter is the circle that passes through
+                        all 3 of the triangle's vertices
+                        expects 3D coordinates
+                    """
+                    #convert 2d to 3d
+                    A = FreeCAD.Vector(A[0],A[1],0)
+                    B = FreeCAD.Vector(B[0],B[1],0)
+                    C = FreeCAD.Vector(C[0],C[1],0)
+
+                    z = C.sub(B).cross(A.sub(B))
+                    a = A.sub(B).Length
+                    b = B.sub(C).Length
+                    c = C.sub(A).Length
+                    r = ((b*b + c*c - a*a)/(2*b*c)) * outerradius(a,b,c)
+                    ret = A.sub(B).cross(z).normalize().multiply(r).add(midpoint(A,B))
+                    #return as 2D
+                    return (ret[0],ret[1])
+
+                x1, y1 = point1
+                x2, y2 = point2
+                x3, y3 = point3
+
+                center = circumcenter(point1,point2,point3)
+                radius = dist(center,point1)
+                return center[0], center[1], radius
+
+            def find_arc_from_points(self, point1, point2, point3):
+                x1, y1 = point1
+                x2, y2 = point2
+                x3, y3 = point3
+
+                circle = self.find_circle_from_points(point1, point2, point3)
+
+                if circle is None:
+                    return None
+
+                center_x, center_y, radius = circle
+
+                # Calculate the angles relative to the center
+                angle1 = math.atan2(y1 - center_y, x1 - center_x)
+                angle2 = math.atan2(y2 - center_y, x2 - center_x)
+                angle3 = math.atan2(y3 - center_y, x3 - center_x)
+
+                # Ensure angles are between 0 and 2*pi
+                def normalize_angle(angle):
+                    while angle < 0:
+                        angle += 2 * math.pi
+                    while angle >= 2 * math.pi:
+                        angle -= 2 * math.pi
+                    return angle
+
+                angle1 = normalize_angle(angle1)
+                angle2 = normalize_angle(angle2)
+                angle3 = normalize_angle(angle3)
+
+                # Sort the angles to determine start and end angles
+                angles = [angle1, angle2, angle3]
+                #angles.sort()
+
+                start_angle = math.degrees(angles[0])
+                end_angle = math.degrees(angles[2])
+
+                return center_x, center_y, radius, start_angle, end_angle
 
             def makeImage(self, text, scale, thickness, color, bgColor, borderColor, borderThickness):
                 """text is text to be used, scale is a float, thickness is an integer for
@@ -787,12 +2102,54 @@ class CustomToolbarEditor(QtGui.QWidget):
                     text = polygonString #we do the polygon with existing polyline code
                     #print(f"polygonString = {polygonString}")
 
+                #this allows the user to click on the image, and then enter simply "floodfill()"
+                #to have a new string generated in the form of "floodfill(clickX, clickY, defaultTolerance)"
+                floodfillString = self.floodfillAuto_to_floodfill(text)
+                if floodfillString:
+                    self.textEdit.setText(floodfillString)
+                    text = floodfillString
+                    if self.xAdjustSpinBox.value() or self.yAdjustSpinBox.value():
+                        self.cte.showMsg("Set X adjust and Y adjust to 0 or else the seed point might not be where you expect it to be","warning")
+
+                lineString = self.lineAuto_to_line(text)
+                if lineString:
+                    text = lineString
+                    self.textEdit.setText(lineString)
+                    if self.xAdjustSpinBox.value() or self.yAdjustSpinBox.value():
+                        self.cte.showMsg("Set X adjust and Y adjust to 0 or else the line might not be where you expect it to be","warning")
+
+                if text.startswith("rectangle()"):
+                    #allow to use rectangle() to get the last 2 clicks used in rectangle function
+                    if len(self.lastClicks) >= 2:
+                        (x1,y1) = self.lastClicks[0]
+                        (x2,y2) = self.lastClicks[1]
+                        rectStr = f"rectangle({x1},{y1}, {x2},{y2})"
+                        text = rectStr.replace(" ","")
+                        self.textEdit.setText(rectStr)
+                    else:
+                        self.cte.showMsg("Add 2 construction mode points first, and then make this rectangle.")
+
+                if text.startswith("circle3points()"):
+                    if len(self.lastClicks) >= 3:
+                        p1 = self.lastClicks[0]
+                        p2 = self.lastClicks[1]
+                        p3 = self.lastClicks[2]
+                        centerX,centerY,radius = self.find_circle_from_points(p1,p2,p3)
+                        x = int(round(centerX))
+                        y = int(round(centerY))
+                        r = int(round(radius))
+                        text = f"circle({x},{y},{r})"
+                        self.textEdit.setText(text)
+
+
+
                 #line(x1, y1, x2, y2)
                 linePattern = r"^line\((\d+),(\d+),(\d+),(\d+)\)"
                 lineMatch = re.search(linePattern, text.lower().replace(" ",""))
                 #rectangle(top left x, top left y, bottom right x, bottom right y)
                 rectanglePattern = r"^rectangle\((\d+),(\d+),(\d+),(\d+)\)"
                 rectangleMatch = re.search(rectanglePattern, text.lower().replace(" ",""))
+
                 #circle(x,y,radius)
                 circlePattern = r"^circle\((\d+),(\d+),(\d+)\)"
                 circleMatch = re.search(circlePattern, text.lower().replace(" ",""))
@@ -800,8 +2157,15 @@ class CustomToolbarEditor(QtGui.QWidget):
                 polylinePattern = r"^polyline\("
                 polylineMatch = re.search(polylinePattern, text.lower().replace(" ",""))
                 #ellipse(x, y, major radius,minor radius,angle=0)
-                ellipsePattern = r"ellipse\((\d+),(\d+),(\d+),(\d+)(?:,(\d+))?\)"
+                ellipsePattern = r"^ellipse\((\d+),(\d+),(\d+),(\d+)(?:,(\d+))?\)"
+                ellipsePattern7 = r"^ellipse\((\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+)\)"
                 ellipseMatch = re.search(ellipsePattern, text.lower().replace(" ",""))
+                ellipseMatch7 = re.search(ellipsePattern7, text.lower().replace(" ",""))
+                floodfillPattern = r"^floodfill\((\d+),(\d+),(\d+)\)"
+                floodfillMatch = re.search(floodfillPattern, text.lower().replace(" ",""))
+                floodfillAllPattern = r"^floodfillall\((\d+)\)"
+                floodfillAllMatch = re.search(floodfillAllPattern, text.lower().replace(" ",""))
+
 
                 #everything can be dragged
                 xAdj = self.xAdjustSpinBox.value()
@@ -811,6 +2175,7 @@ class CustomToolbarEditor(QtGui.QWidget):
                 scaleAdj = self.scaleSpinBox.value()
                 #only objects with angle property get adjusted with this
                 angleAdj = self.angleAdjustSpinBox.value()
+                lineType = self.lineTypes[self.lineTypeBox.currentText()]
 
 
                 if lineMatch:
@@ -820,8 +2185,9 @@ class CustomToolbarEditor(QtGui.QWidget):
                     y2 = int(lineMatch.group(4))
 
                     if borderThickness != 0:
-                        cv2.line(image, (x1 + xAdj ,y1 + yAdj), (x2 + xAdj,y2 + yAdj), borderColor, thickness + borderThickness)
-                    cv2.line(image, (x1 + xAdj ,y1 + yAdj), (x2 + xAdj,y2 + yAdj), color, thickness)
+                        cv2.line(image, (x1 + xAdj ,y1 + yAdj), (x2 + xAdj,y2 + yAdj), borderColor, \
+                                        thickness + borderThickness, lineType = lineType)
+                    cv2.line(image, (x1 + xAdj ,y1 + yAdj), (x2 + xAdj,y2 + yAdj), color, thickness, lineType = lineType)
 
                 elif rectangleMatch:
                     x1 = int(rectangleMatch.group(1))
@@ -830,8 +2196,30 @@ class CustomToolbarEditor(QtGui.QWidget):
                     y2 = int(rectangleMatch.group(4))
 
                     if borderThickness != 0:
-                        cv2.rectangle(image, (x1 + xAdj ,y1 + yAdj), (x2 + xAdj,y2 + yAdj), borderColor, thickness + borderThickness)
-                    cv2.rectangle(image, (x1 + xAdj ,y1 + yAdj), (x2 + xAdj,y2 + yAdj), color, thickness)
+                        cv2.rectangle(image, (x1 + xAdj ,y1 + yAdj), (x2 + xAdj,y2 + yAdj), borderColor, \
+                                thickness + borderThickness, lineType = lineType)
+                    cv2.rectangle(image, (x1 + xAdj ,y1 + yAdj), (x2 + xAdj,y2 + yAdj), color, thickness, lineType = lineType)
+
+                elif text.lower().replace(" ","").startswith("rectangles()"):
+                    pairs = [self.lastClicks[i:i+2] for i in range(0, len(self.lastClicks), 2)]
+                    if len(pairs) > 1 and len(pairs[-1]) == 1:
+                        # If the last pair has only one element, convert it to a list.
+                        pairs[-2].extend(pairs[-1])
+                        pairs.pop()
+                    for isBorder in [True,False]:
+                        if isBorder and borderThickness == 0:
+                            continue
+                        for pair in pairs:
+                            if len(pair) == 2:
+                                x1,y1 = pair[0]
+                                x2,y2 = pair[1]
+                            else:
+                                continue #ignore any extra last single points
+                            if isBorder:
+                                cv2.rectangle(image, (x1 + xAdj ,y1 + yAdj), (x2 + xAdj,y2 + yAdj), borderColor, \
+                                    thickness + borderThickness, lineType = lineType)
+                            else:
+                                cv2.rectangle(image, (x1 + xAdj ,y1 + yAdj), (x2 + xAdj,y2 + yAdj), color, thickness, lineType = lineType)
 
                 elif circleMatch:
                     x = int(circleMatch.group(1))
@@ -839,8 +2227,174 @@ class CustomToolbarEditor(QtGui.QWidget):
                     r = int(round(float(circleMatch.group(3)) * scaleAdj))
 
                     if borderThickness != 0:
-                        cv2.circle(image, (x + xAdj ,y + yAdj), r, borderColor, thickness + borderThickness)
-                    cv2.circle(image, (x + xAdj ,y + yAdj), r, color, thickness)
+                        cv2.circle(image, (x + xAdj ,y + yAdj), r, borderColor, thickness + borderThickness, lineType = lineType)
+                    cv2.circle(image, (x + xAdj ,y + yAdj), r, color, thickness, lineType = lineType)
+
+                elif text.startswith("arc3points()") or text.startswith("arc3points2()"):
+                    if len(self.lastClicks) >= 3:
+                        p1 = self.lastClicks[0]
+                        p2 = self.lastClicks[1]
+                        p3 = self.lastClicks[2]
+                        centerX,centerY,radius,startAngle,endAngle = self.find_arc_from_points(p1,p2,p3)
+                        center_x = int(round(centerX))
+                        center_y = int(round(centerY))
+                        r = int(round(radius))
+                        startAngle = int(round(startAngle))
+                        endAngle = int(round(endAngle))
+                        angle = int(0)
+
+
+                        if startAngle > endAngle:
+                            tmp = startAngle
+                            startAngle = endAngle
+                            endAngle = tmp
+
+
+                        arc_points1 = []
+                        arc_points2 = []
+                        angles1 = []
+                        angles2 = []
+
+                        for alpha in range(startAngle, endAngle+1):
+                            x = int(centerX + (r * scaleAdj) * math.cos(math.radians(alpha)) + xAdj)
+                            y = int(centerY + (r * scaleAdj) * math.sin(math.radians(alpha)) + yAdj)
+                            arc_points1.append((x, y))
+                            angles1.append(alpha)
+
+                        for alpha in range(endAngle, 361):
+                            x = int(centerX + (r * scaleAdj) * math.cos(math.radians(alpha)) + xAdj)
+                            y = int(centerY + (r * scaleAdj) * math.sin(math.radians(alpha)) + yAdj)
+                            arc_points2.append((x, y))
+                            angles2.append(alpha)
+
+                        for alpha in range(0, startAngle):
+                            x = int(centerX + (r * scaleAdj) * math.cos(math.radians(alpha)) + xAdj)
+                            y = int(centerY + (r * scaleAdj) * math.sin(math.radians(alpha)) + yAdj)
+                            arc_points2.append((x, y))
+                            angles2.append(alpha)
+
+
+                        if "arc3points2" in text:
+                            arc_points = arc_points2
+                        else:
+                            arc_points = arc_points1
+
+                        if borderThickness != 0:
+                            x1,y1 = arc_points[0]
+                            for x2,y2 in arc_points[1:]:
+                                cv2.line(image, (x1 + xAdj ,y1 + yAdj), (x2 + xAdj,y2 + yAdj), borderColor, \
+                                        thickness + borderThickness, lineType = lineType)
+                                x1,y1 = x2,y2
+
+                        x1,y1 = arc_points[0]
+                        for x2,y2 in arc_points[1:]:
+                            cv2.line(image, (x1 + xAdj ,y1 + yAdj), (x2 + xAdj,y2 + yAdj), color, \
+                                    thickness, lineType = lineType)
+                            x1,y1 = x2,y2
+
+                elif text.startswith("putpoints()"):
+                    if self.lastClicks:
+                        if borderThickness != 0:
+                            for x,y in self.lastClicks:
+                                cv2.line(image, (x + xAdj ,y + yAdj), (x + xAdj,y + yAdj), borderColor, \
+                                        thickness + borderThickness, lineType = lineType)
+                        for x,y in self.lastClicks:
+                            cv2.line(image, (x + xAdj ,y + yAdj), (x + xAdj,y + yAdj), color, thickness, lineType = lineType)
+
+                elif floodfillMatch:
+                    x = int(floodfillMatch.group(1))
+                    y = int(floodfillMatch.group(2))
+                    tol = int(floodfillMatch.group(3))
+                    self.seed_x = x + xAdj
+                    self.seed_y = y + yAdj
+                    if self.seed_x < 0:
+                        self.seed_x = 0
+                    elif self.seed_x > 63:
+                        self.seed_x = 63
+                    if self.seed_y < 0:
+                        self.seed_y = 0
+                    elif self.seed_y > 63:
+                        self.seed_y = 63
+
+                    self.showPoints([(self.seed_x,self.seed_y)],(128,128,128))
+                    cv2.floodFill(image, None, (self.seed_x, self.seed_y), color, loDiff=(tol, tol, tol), upDiff = (tol, tol, tol))
+
+
+                elif floodfillAllMatch:
+                    tol = int(floodfillAllMatch.group(1))
+                    pts = self.lastClicks
+                    for pt in pts:
+                        cv2.floodFill(image, None, pt , color, loDiff=(tol, tol, tol), upDiff = (tol, tol, tol))
+
+                elif text.startswith("SketchImported:"):
+                    if thickness <= 0:
+                        thickness = 1
+                        self.statusBox.setText("Thickness must be at least 1 for sketch imports")
+                    modes = ["border", "foreground"]
+                    for mode in modes:
+                        if mode == "border" and borderThickness == 0:
+                            continue
+                        strings = text.split("\n")
+                        for txt in strings[1:]:
+                            if txt.startswith("line("):
+                                pattern = r"^line\((-?\d+),(-?\d+),(-?\d+),(-?\d+)\)"
+                                match = re.search(pattern,txt)
+                                if match:
+                                    x1 = int(match.group(1))
+                                    y1 = int(match.group(2))
+                                    x2 = int(match.group(3))
+                                    y2 = int(match.group(4))
+                                    if mode == "border":
+                                        cv2.line(image, (x1 + xAdj ,y1 + yAdj), (x2 + xAdj,y2 + yAdj), borderColor, \
+                                                thickness + borderThickness, lineType = lineType)
+                                    else:
+                                        cv2.line(image, (x1 + xAdj ,y1 + yAdj), (x2 + xAdj,y2 + yAdj), color, \
+                                                thickness, lineType = lineType)
+                                else:
+                                    raise Exception(f"Unable to match line for {txt}")
+                            elif txt.startswith("circle("):
+                                pattern = r"^circle\((-?\d+),(-?\d+),(\d+)\)"
+                                match = re.search(pattern,txt)
+                                if match:
+                                    x = int(match.group(1))
+                                    y = int(match.group(2))
+                                    r = int(match.group(3))
+                                    if mode == "border":
+                                        cv2.circle(image, (x + xAdj ,y + yAdj), r, borderColor, \
+                                            thickness + borderThickness, lineType = lineType)
+                                    else:
+                                        cv2.circle(image, (x + xAdj ,y + yAdj), r, color, thickness, lineType = lineType)
+
+
+                            else:
+                                raise StandardException(f"invalid line: {txt}")
+
+
+                elif text.lower().startswith("polyline()"):
+                    #use the last NNN clicks to do the polyline
+                    if self.lastClicks:
+                        #print(f"points = {points}")
+                        points = [(x + xAdj, y + yAdj) for x,y in self.lastClicks]
+                        is_closed = points[-1] == points[0]
+
+                        if is_closed:
+                            if borderThickness > 0: #do the border first, strip last point since we're using isClosed = True
+                                cv2.polylines(image, [np.array(points[:-1])], isClosed=True, color=borderColor, \
+                                                       thickness = thickness + borderThickness, lineType = lineType)
+                            if thickness == -1: #fill the polygon if thickness = -1
+                                cv2.fillPoly(image, [np.array(points)], color)
+                            elif thickness > 0:
+                                cv2.polylines(image, [np.array(points[:-1])], isClosed=True, color=color, \
+                                    thickness=thickness, lineType = lineType)
+                        else: #not closed, so no fill option and we don't strip the last point from points list
+                            if borderThickness > 0: #do the border first
+                                cv2.polylines(image, [np.array(points)], isClosed=False, color=borderColor, \
+                                                       thickness = thickness + borderThickness, lineType = lineType)
+                            if thickness > 0:
+                                cv2.polylines(image, [np.array(points)], isClosed=False, color=color, \
+                                thickness=thickness, lineType = lineType)
+
+
 
                 elif polylineMatch:
                     #this was a bit tricky, hence the reason for using it for polygon(), too
@@ -865,8 +2419,10 @@ class CustomToolbarEditor(QtGui.QWidget):
                         # Ensure there are at least two coordinates to form pairs
                         if len(coordinates) >= 2:
                             #cv2 needs int arguments, it seems
-                            points = [(int(coordinates[i]), int(coordinates[i + 1])) for i in range(0, len(coordinates), 2)]
-                            #print(f"points = {points}")
+                            try:
+                                points = [(int(coordinates[i]), int(coordinates[i + 1])) for i in range(0, len(coordinates), 2)]
+                            except Exception as e:
+                                print(f"Exception converting {coordinates} to ints: {e}")
 
                     if points:
                         #print(f"points = {points}")
@@ -876,30 +2432,62 @@ class CustomToolbarEditor(QtGui.QWidget):
                         if is_closed:
                             if borderThickness > 0: #do the border first, strip last point since we're using isClosed = True
                                 cv2.polylines(image, [np.array(points[:-1])], isClosed=True, color=borderColor, \
-                                                       thickness = thickness + borderThickness)
+                                                       thickness = thickness + borderThickness, lineType = lineType)
                             if thickness == -1: #fill the polygon if thickness = -1
                                 cv2.fillPoly(image, [np.array(points)], color)
                             elif thickness > 0:
-                                cv2.polylines(image, [np.array(points[:-1])], isClosed=True, color=color, thickness=thickness)
+                                cv2.polylines(image, [np.array(points[:-1])], isClosed=True, color=color, \
+                                        thickness=thickness, lineType = lineType)
                         else: #not closed, so no fill option and we don't strip the last point from points list
                             if borderThickness > 0: #do the border first
                                 cv2.polylines(image, [np.array(points)], isClosed=False, color=borderColor, \
-                                                       thickness = thickness + borderThickness)
+                                                       thickness = thickness + borderThickness, lineType = lineType)
                             if thickness > 0:
-                                cv2.polylines(image, [np.array(points)], isClosed=False, color=color, thickness=thickness)
-                elif ellipseMatch:
-                    center_x = int(ellipseMatch.group(1))
-                    center_y = int(ellipseMatch.group(2))
-                    major_axis = int(round(float(ellipseMatch.group(3)) * scaleAdj))
-                    minor_axis = int(round(float(ellipseMatch.group(4)) * scaleAdj))
-                    #angle is optional argument, defaulting to 0 if left out
-                    angle = int(ellipseMatch.group(5)) if ellipseMatch.group(5) is not None else 0
+                                cv2.polylines(image, [np.array(points)], isClosed=False, color=color, \
+                                thickness=thickness, lineType = lineType)
 
-                    cv2.ellipse(image, (center_x + xAdj, center_y + yAdj), (major_axis, minor_axis), angle + angleAdj, 0, 360, \
-                                                borderColor, borderThickness + thickness)
+                elif ellipseMatch or ellipseMatch7:
+                    if ellipseMatch:
+                        center_x = int(ellipseMatch.group(1))
+                        center_y = int(ellipseMatch.group(2))
+                        major_axis = int(round(float(ellipseMatch.group(3)) * scaleAdj))
+                        minor_axis = int(round(float(ellipseMatch.group(4)) * scaleAdj))
 
-                    cv2.ellipse(image, (center_x + xAdj, center_y + yAdj), (major_axis, minor_axis), angle + angleAdj, 0, 360, \
-                                                color, thickness)
+                        #angle is optional argument for ellipseMatch, but not for ellipseMatch7, defaulting to 0 if left out
+                        if ellipseMatch.group(5):
+                            angle = int(ellipseMatch.group(5)) if ellipseMatch.group(5) is not None else 0
+                        startAngle = 0
+                        endAngle = 360
+
+                    else: #ellipseMatch7
+                        center_x = int(ellipseMatch7.group(1))
+                        center_y = int(ellipseMatch7.group(2))
+                        major_axis = int(round(float(ellipseMatch7.group(3)) * scaleAdj))
+                        minor_axis = int(round(float(ellipseMatch7.group(4)) * scaleAdj))
+
+                        #angle is optional argument for ellipseMatch, but not for ellipseMatch7, defaulting to 0 if left ou
+                        angle = int(ellipseMatch7.group(5))
+                        startAngle = int(ellipseMatch7.group(6))
+                        endAngle = int(ellipseMatch7.group(7))
+
+                    cv2.ellipse(image, (center_x + xAdj, center_y + yAdj), (major_axis, minor_axis), angle + angleAdj, \
+                                 color = borderColor, thickness = borderThickness + thickness, startAngle = startAngle, \
+                                    endAngle = endAngle, lineType = lineType)
+
+                    cv2.ellipse(image, (center_x + xAdj, center_y + yAdj), (major_axis, minor_axis), angle + angleAdj, \
+                               color=color, thickness=thickness,  startAngle = startAngle, endAngle = endAngle, \
+                                 lineType = lineType)
+
+                elif text.startswith("ellipse5points()"):
+                    if len(self.lastClicks) >= 5:
+
+                        points = np.array([self.lastClicks[:5]])
+                        points = points + np.array([xAdj,yAdj])
+
+                        ellipse =cv2.fitEllipse(points)
+                        print(f"ellipse = {ellipse}")
+                        cv2.ellipse(image, ellipse, color=borderColor, thickness=thickness+borderThickness, lineType=lineType)
+                        cv2.ellipse(image, ellipse, color=color, thickness=thickness, lineType=lineType)
 
                 else: #interpret as text
 
@@ -918,7 +2506,7 @@ class CustomToolbarEditor(QtGui.QWidget):
                     if not "\\n" in text:
                         if borderThickness:
                             cv2.putText(image, text, (x, y), font, font_scale, borderColor, \
-                                    font_thickness + borderThickness, lineType=cv2.LINE_AA)
+                                    font_thickness + borderThickness, lineType=lineType)
                         cv2.putText(image, text, (x, y), font, font_scale, font_color, font_thickness)
                     else:
                         idx = text.find("\\n")
@@ -927,9 +2515,9 @@ class CustomToolbarEditor(QtGui.QWidget):
                         #print(f"text1,text2: {text1},{text2}")
                         if borderThickness:
                             cv2.putText(image, text1, (x, y), font, font_scale, borderColor, \
-                                                font_thickness + borderThickness, lineType=cv2.LINE_AA)
+                                                font_thickness + borderThickness, lineType=lineType)
                             cv2.putText(image, text2, (x, y + int(text_size[1] * 1.25)), font, font_scale, borderColor, \
-                                                font_thickness + borderThickness, lineType=cv2.LINE_AA)
+                                                font_thickness + borderThickness, lineType=lineType)
                         cv2.putText(image, text1, (x, y), font, font_scale, font_color, font_thickness)
                         cv2.putText(image, text2, (x, y + int(text_size[1] *1.25)), font, font_scale, font_color, font_thickness)
                         if text.count("\\n") > 1:
@@ -969,10 +2557,17 @@ class CustomToolbarEditor(QtGui.QWidget):
         self.iconMakerTabWidget.setObjectName("IconMakerTabWidget")
         self.iconMakerTabWidget.setWindowTitle("Simple 64x64 Icon Maker")
         self.iconMakerDlg = SimpleIconMaker(self, layer=1, tabWidget = self.iconMakerTabWidget)
-        self.iconMakerDlg.closeTabButton.setEnabled(False)
+        widget = QtGui.QWidget()
+        btn = QtGui.QPushButton() #to get the icon for the tab
+        self.iconize(btn,system_name="list-add")
+        icon = btn.icon()
+        self.iconMakerTabWidget.addTab(widget,"")
+        self.iconMakerTabWidget.setTabIcon(0,icon)
+        self.iconMakerTabWidget.currentChanged.connect(self.iconMakerDlg.onTabWidgetCurrentChanged)
         self.iconMakerTabWidget.addTab(self.iconMakerDlg,"Layer1")
         self.iconMakerTabWidget.installEventFilter(self.iconMakerDlg)
         self.iconMakerTabWidget.show()
+        self.iconMakerTabWidget.setCurrentWidget(self.iconMakerDlg)
         self.iconMakerDlg.textEdit.selectAll()
         self.iconMakerDlg.textEdit.setFocus()
 
@@ -1621,9 +3216,8 @@ class CustomToolbarEditor(QtGui.QWidget):
             self.handlePixmap()
 
     def saveXPMFile(self, default_folder, default_filename, content):
-        file_name, ok = QtGui.QFileDialog.getSaveFileName(None, \
-                                        "Save File As",\
-                                        f"{default_folder}\{default_filename}")
+        file_name, ok = QtGui.QFileDialog.getSaveFileName(None, "Save File As", f"{default_folder}/{default_filename}",
+                                                 "Images (*.xpm *.svg);;All Files (*)")
         if file_name:
             with open(file_name, 'w') as file:
                 file.write(content)
@@ -1632,7 +3226,8 @@ class CustomToolbarEditor(QtGui.QWidget):
 
     def saveExtractedButtonClicked(self): #Save XPM button
         macroBaseName = os.path.splitext(self.form.ComboBoxMacroName.currentText())[0]
-        ext = ".xpm"
+        content = self.form.PlainTextEditExtracted.toPlainText()
+        ext = ".xpm" if "xpm" in content.lower() else ".svg" if "svg" in content.lower() else ".txt"
         iconFolders = self.getIconFolders()
         if iconFolders:
             default_folder = iconFolders[0]
@@ -1923,8 +3518,6 @@ class CustomToolbarEditor(QtGui.QWidget):
 
         else:
             self.showMsg(f"User canceled.  The toolbar {self.tbName} has not been deleted.")
-
-
 
     def reject(self):
         self.form.close()
@@ -2651,6 +4244,328 @@ class ToolbarManager:
         ToolbarManager.refreshToolbar()
         return bSuccess
 
+refreshButtonIcon = """
+/* XPM */
+static char *dummy[]={
+"64 64 253 2",
+".i c #257070",
+".Z c #257474",
+"a6 c #267070",
+".j c #267171",
+".9 c #277171",
+"br c #277272",
+"ay c #277878",
+"aa c #277c7c",
+"aF c #287171",
+"#q c #287272",
+"#l c #287373",
+"#X c #297373",
+".u c #297e7e",
+"aV c #298080",
+"aY c #298484",
+".k c #2a7373",
+".r c #2a7474",
+".x c #2a7f7f",
+"#u c #2a8383",
+"bv c #2a8686",
+"bt c #2a8787",
+"bW c #2b7373",
+"al c #2b8181",
+"am c #2b8282",
+"bJ c #2b8585",
+"bI c #2b8686",
+".0 c #2b8888",
+".Y c #2b8989",
+"bV c #2b8a8a",
+".t c #2c7474",
+"b1 c #2c7575",
+".E c #2d7575",
+".q c #2d7676",
+".n c #2d7777",
+".h c #2d7878",
+".v c #2d8c8c",
+"bU c #2e7575",
+"b3 c #2e7878",
+".I c #2e8b8b",
+".J c #2e8d8d",
+"#B c #2e9797",
+"#D c #2e9898",
+".w c #2f8c8c",
+"#O c #2f8e8e",
+"#R c #2f9191",
+"bZ c #2f9393",
+".6 c #2f9595",
+".5 c #2f9696",
+"bD c #2f9797",
+"a7 c #307676",
+"aq c #307777",
+"bk c #308f8f",
+"aj c #309090",
+"aw c #309292",
+".R c #309393",
+"ak c #309494",
+"#C c #309797",
+".S c #309898",
+"aI c #317878",
+".D c #319898",
+"aU c #327979",
+".z c #329797",
+"bw c #329898",
+"#T c #339999",
+"#U c #339d9d",
+".T c #33a6a6",
+"bh c #349c9c",
+"bi c #349f9f",
+".Q c #34a6a6",
+"#N c #357b7b",
+"ag c #367b7b",
+"ao c #367c7c",
+"bH c #397e7e",
+"#a c #3a7e7e",
+"#d c #3a7f7f",
+"as c #3aadad",
+"#5 c #3bb4b4",
+"a2 c #3c7f7f",
+"aG c #3c8080",
+"aE c #3d8080",
+"#7 c #3db6b6",
+"#Y c #3dbaba",
+"bb c #3dbbbb",
+"#G c #3e8181",
+"#6 c #3ebebe",
+"bf c #3ebfbf",
+"a9 c #3fbebe",
+"#1 c #3fc0c0",
+"a. c #3fc2c2",
+"ai c #40bfbf",
+"a8 c #40c1c1",
+"b. c #41c1c1",
+"ah c #41c2c2",
+"an c #41c3c3",
+"#0 c #42c4c4",
+"at c #42c7c7",
+"#9 c #42c9c9",
+"#c c #42cbcb",
+"bc c #43c5c5",
+"#3 c #43c6c6",
+"#V c #43c7c7",
+"ad c #43c9c9",
+"ac c #43caca",
+"bq c #43cbcb",
+"aS c #448686",
+"aR c #448787",
+"#f c #44caca",
+"bo c #44cbcb",
+"#i c #44cdcd",
+"#Z c #44cece",
+"bF c #44cfcf",
+"#b c #44d0d0",
+"#H c #44d1d1",
+"#I c #45cbcb",
+"bn c #45cdcd",
+"#h c #45cece",
+"#g c #45d0d0",
+".V c #468888",
+"#P c #46d0d0",
+"#n c #46d7d7",
+"bQ c #478686",
+"bO c #478787",
+".P c #478989",
+"#o c #47d1d1",
+"bj c #47d3d3",
+"bm c #47d4d4",
+"aL c #488787",
+".O c #488888",
+"bl c #48dbdb",
+"bR c #498888",
+"#Q c #49dfdf",
+"aK c #4a8989",
+".L c #4a8a8a",
+"aQ c #4adfdf",
+"ax c #4ae0e0",
+"aJ c #4b8989",
+"a1 c #4d8989",
+"bM c #4f8b8b",
+"b# c #4feaea",
+"ab c #4febeb",
+"ae c #4fecec",
+"bP c #4feded",
+".A c #4feeee",
+".C c #4fefef",
+".M c #4ff0f0",
+".N c #4ff1f1",
+".X c #4ff2f2",
+".4 c #4ff8f8",
+".7 c #4ff9f9",
+".2 c #508b8b",
+"bN c #508c8c",
+".W c #508d8d",
+"bG c #50efef",
+"bB c #50f0f0",
+".U c #50f1f1",
+".1 c #50f2f2",
+"bp c #50f8f8",
+"#t c #50f9f9",
+"aB c #51f4f4",
+"#s c #51f9f9",
+"#v c #51fafa",
+"#S c #51fbfb",
+"#. c #52f8f8",
+"bu c #52f9f9",
+"aZ c #538f8f",
+"aX c #53f9f9",
+"#m c #53fdfd",
+"aO c #548f8f",
+"bx c #54fbfb",
+"#p c #54fcfc",
+"#E c #54fefe",
+"a0 c #559090",
+".B c #55ffff",
+"aN c #568f8f",
+"bS c #5f9696",
+".K c #619696",
+".H c #629797",
+"b6 c #669999",
+".l c #679a9a",
+"b5 c #679b9b",
+"#2 c #6a9e9e",
+"be c #6b9d9d",
+".g c #6b9e9e",
+"#4 c #6fa3a3",
+"aP c #72a2a2",
+".b c #75a5a5",
+"bA c #7caaaa",
+"bC c #7cabab",
+"#r c #7eacac",
+"#w c #80abab",
+"a# c #82abab",
+".e c #82adad",
+"#W c #82afaf",
+".c c #83adad",
+"bs c #84aeae",
+"bE c #84b0b0",
+"bg c #85b0b0",
+"ba c #86aeae",
+"#e c #87aeae",
+"#J c #88afaf",
+"#j c #88b2b2",
+"bK c #8cb4b4",
+".f c #8eb3b3",
+"bL c #8eb4b4",
+".a c #8eb6b6",
+".3 c #90b6b6",
+"av c #95bbbb",
+"az c #96baba",
+"aT c #9abdbd",
+"bz c #9abebe",
+"au c #9ec1c1",
+"#x c #a0c0c0",
+"a5 c #a3c4c4",
+".d c #a4c3c3",
+".s c #a5c5c5",
+"b0 c #a6c3c3",
+"ar c #a8c7c7",
+"aC c #a9c7c7",
+"bY c #a9c8c8",
+"a4 c #aac8c8",
+".p c #abc6c6",
+"#8 c #acc8c8",
+"#M c #adcaca",
+"aA c #adcbcb",
+"bd c #aec9c9",
+".o c #afcccc",
+"b4 c #b0cbcb",
+"by c #b4cdcd",
+"b2 c #b4d0d0",
+".m c #b5cfcf",
+"#A c #b9d0d0",
+"#y c #b9d2d2",
+"bX c #bcd2d2",
+".F c #bdd5d5",
+"aW c #bfd5d5",
+"bT c #c1d8d8",
+".y c #c2d6d6",
+"aH c #c8dbdb",
+"a3 c #c9dddd",
+"#F c #cedfdf",
+"aD c #cee0e0",
+"af c #d0e0e0",
+"## c #d0e2e2",
+".8 c #d1dfdf",
+"#z c #d2e1e1",
+"#K c #d3e2e2",
+".# c #deeaea",
+"#k c #dfe9e9",
+"ap c #dfebeb",
+".G c #eef4f4",
+"#L c #eff3f3",
+"aM c #f9fbfb",
+"Qt c None",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt.#.a.b.c.d.e.b.f.#QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt.#.g.h.i.i.i.i.i.i.i.i.j.k.l.#QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt.m.h.i.i.i.i.i.i.i.i.i.i.i.i.i.i.j.n.oQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt.p.q.i.i.i.i.i.i.i.i.i.i.i.i.i.i.i.i.i.i.i.r.sQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt.p.t.i.i.i.i.i.i.i.i.u.v.v.w.v.v.x.i.i.i.i.i.i.i.i.r.sQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt.y.t.i.i.i.i.i.i.i.u.z.A.B.B.B.B.B.B.B.C.D.x.i.i.i.i.i.i.i.E.FQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQt.G.H.i.i.i.i.i.i.i.I.A.B.B.B.B.B.B.B.B.B.B.B.B.B.C.J.i.i.i.i.i.i.i.K.GQtQtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQt.G.L.i.i.i.i.i.i.I.M.B.B.B.B.B.B.B.B.B.B.B.B.B.B.B.B.B.N.J.i.i.i.i.i.i.O.GQtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQt.G.P.i.i.i.i.i.I.M.B.B.B.B.B.B.B.C.Q.R.S.R.T.U.B.B.B.B.B.B.B.N.J.i.i.i.i.i.V.GQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQt.G.W.i.i.i.i.x.A.B.B.B.B.B.B.X.Q.Y.Z.i.i.i.i.i.Z.0.T.1.B.B.B.B.B.B.M.x.i.i.i.i.2.GQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQt.3.i.i.i.i.x.4.B.B.B.B.B.N.5.Z.i.i.i.i.i.i.i.i.i.i.i.Z.6.1.B.B.B.B.B.7.x.i.i.i.i.3QtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQt.8.9.i.i.i.x#..B.B.B.B.N.5.Z.i.i.i.i.i.i.i.i.i.i.i.i.i.i.i.Z.6.1.B.B.B.B.7.x.i.i.i.j##QtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQt.G#a.i.i.i.x.4.B.B.B.B#b.Z.i.i.i.i.i.i.u.v.v.v.v.v.x.i.i.i.i.i.i.Z#c.B.B.B.B.4.x.i.i.i#d.GQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQt#e.i.i.i.i#f.B.B.B.B#g.Z.i.i.i.i.i.I.A.B.B.B.B.B.B.B.C.J.i.i.i.i.i.Z#h.B.B.B.B#i.i.i.i.i#jQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQt#k#l.i.i.i.J#m.B.B.B#n.Z.i.i.i.i.I.M.B.B.B.B.B.B.B.B.B.B.B.N.J.i.i.i.i.Z#o.B.B.B#p.J.i.i.i#q.#QtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQt#r.i.i.i.x#s.B.B.B#t#u.i.i.i.x.A.B.B.B.B.B.B.B.B.B.B.B.B.B.B.B.M.x.i.i.i#u#v.B.B.B.7.x.i.i.i#wQtQtQtQtQtQtQtQt",
+"QtQtQtQt.##x#y#z#A#q.i.i.i#f.B.B.B#p#B.i.i.i.x.4.B.B.B.B.B.N.Q#C#C#C.T.1.B.B.B.B.B.7.x.i.i.i#D#E.B.B.B#i.i.i.i#q.#QtQtQtQtQtQtQt",
+"QtQt#F#G#q.i.i.i.i.i.i.i.x.7.B.B.B#H.i.i.i.x#..B.B.B.B.N.5.Z.i.i.i.i.i.Z.6.1.B.B.B.B.7.x.i.i.i#I.B.B.B.7.x.i.i.i#JQtQtQtQtQtQtQt",
+"Qt#K#q.i.i.i.i.i.i.i.i.i#f.B.B.B#t#u.i.i.x.4.B.B.B.B#b.Z.i.i.i.i.i.i.i.i.i.Z#c.B.B.B.B.4.x.i.i#u#t.B.B.B#i.i.i.i.q#LQtQtQtQtQtQt",
+"#M.j.i.i.i.i.i.i.i.i.i.x.7.B.B.B#H.i.i.i#f.B.B.B.B#g.Z.i.i.i.i.i.i.i.i.i.i.i.Z#h.B.B.B.B#i.i.i.i#I.B.B.B.7.x.i.i.i.8QtQtQtQtQtQt",
+"#N.i.i.i.i#O.w#O#O#O#O#P.B.B.B#t#u.i.i.x.7.B.B.B#Q#R#O#O#O#O.i.i.i.i.j.i.i.i.i.Z#o.B.B.B#S#T#O#O#U#S.B.B.B#V.i.i.i#WQtQtQtQtQtQt",
+"#X.i.i.i#Y.B.B.B.B.B.B.B.B.B.B#Z.i.i.i#0.B.B.B.B.B.B.B.B.B.B#1.i.i.i#X#2.i.i.i.i#u#t.B.B.B.B.B.B.B.B.B.B.B#3.i.i.i#4QtQtQtQtQtQt",
+".i.i.i#5.B.B.B.B.B.B.B.B.B.B.B#1.i.i.i#6.B.B.B.B.B.B.B.B.B.B.B#7.i.i.i#8#A.i.i.i.i#9.B.B.B.B.B.B.B.B.B.B.Ba..i.i.ia#QtQtQtQtQtQt",
+"#X.i.iaaab.B.B.B.B.B.B.B.B.Bac.Z.i.i.i.Zad.B.B.B.B.B.B.B.B.Baeaa.i.i#X.#Qt.l.i.i.i.Zad.B.B.B.B.B.B.B.B.Bac.Z.i.i.iafQtQtQtQtQtQt",
+"ag.i.i.i.Zah.B.B.B.Baiajakal.Z.i.i.i.i.i.Zamakajai.B.B.B.Ban.Z.i.i.iao#LQtap#q.i.i.i.Zamakajajajajajakal.Z.i.i.iaq#LQtQtQtQtQtQt",
+"ar.i.i.i.i.ias.B.B.B.Bat.i.i.i.i.i.i.i.i.i.i.iat.B.B.B.Bas.i.i.i.i.i#8QtQtQtau.i.i.i.i.i.i.i.i.i.i.i.i.i.i.i.i.i#8QtQtQtQtQtQtQt",
+"Qtav.i.i.i.i.iaw.B.B.B.Baxay.i.i.i.i.i.i.iayax.B.B.B.Baw.i.i.i.i.iazQtQtQtQtQt#K.9.i.i.i.i.i.i.i.i.i.i.i.i.i.9#KQtQtQtQtQtQtQtQt",
+"QtQtaA.i.i.i.i.iamaB.B.B.BaBam.i.i.i.i.iamaB.B.B.BaBam.i.i.i.i.iaCQtQtQtQtQtQtQtaDaEaF.i.i.i.i.i.i.i.i.iaFaGaHQtQtQtQtQtQtQtQtQt",
+"QtQtQt.#aI.i.i.i.iayax.B.B.B.Baw.i.i.iaw.B.B.B.Baxay.i.i.i.iaI.#QtQtQtQtQtQtQtQtQtQt.#aJ.i.i.i.i.i.i.iaK.#QtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQt.GaL.i.i.i.i.iat.B.B.B.Bas.ias.B.B.B.Bat.i.i.i.i.iaL.GQtQtQtQtQtQtQtQtQtQtaMaN.i.i.i.i.i.i.i.i.iaOaMQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtaMaP.i.i.i.i.ias.B.B.B.BaQ.B.B.B.Bas.i.i.i.i.iaPaMQtQtQtQtQtQtQtQtQtQt.GaR.i.i.i.i.iaj.i.i.i.i.iaS.GQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtaT.i.i.i.i.iaw.B.B.B.B.B.B.Baw.i.i.i.i.iaTQtQtQtQtQtQtQtQtQtQtQt.#aU.i.i.i.iaV.M.B.NaV.i.i.i.iaU.#QtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtaW.i.i.i.i.iam#s.B.B.BaXam.i.i.i.i.iaWQtQtQtQtQtQtQtQtQtQtQtaW.i.i.i.i.iam#s.B.B.BaXam.i.i.i.i.iaWQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQt.#aU.i.i.i.iaY.U.B.1aY.i.i.i.iaU.#QtQtQtQtQtQtQtQtQtQtQtaT.i.i.i.i.iaw.B.B.B.B.B.B.Baw.i.i.i.i.iaTQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQt.GaR.i.i.i.i.Zaj.Z.i.i.i.iaS.GQtQtQtQtQtQtQtQtQtQtaMaP.i.i.i.i.ias.B.B.B.BaQ.B.B.B.Bas.i.i.i.i.iaPaMQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtaMaZ.i.i.i.i.i.i.i.i.ia0aMQtQtQtQtQtQtQtQtQtQt.GaL.i.i.i.i.iat.B.B.B.Bas.ias.B.B.B.Bat.i.i.i.i.iaL.GQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQt.#a1.i.i.i.i.i.i.ia1.#QtQtQtQtQtQtQtQtQtQt.#aI.i.i.i.iayax.B.B.B.Baw.i.i.iaw.B.B.B.Baxay.i.i.i.iaI.#QtQt",
+"QtQtQtQtQtQtQtQtQtQt#F#GaF.i.i.i.i.i.i.i.i.iaFa2a3QtQtQtQtQtQtQt#M.i.i.i.i.iamaB.B.B.BaBam.i.i.i.i.iamaB.B.B.BaBam.i.i.i.i.ia4Qt",
+"QtQtQtQtQtQtQtQtQt#KaF.i.i.i.i.i.i.i.i.i.i.i.i.i.j#KQtQtQtQtQtaz.i.i.i.i.iaw.B.B.B.Baxay.i.i.i.i.i.i.iayax.B.B.B.Baw.i.i.i.i.iav",
+"QtQtQtQtQtQtQtQt#M.j.i.i.i.i.i.i.i.i.i.i.i.i.i.i.i.ia5QtQtQt#Ma6.i.i.i.ias.B.B.B.Bat.i.i.i.i.i.i.i.i.i.i.iat.B.B.B.Bas.i.i.i.i.j",
+"QtQtQtQtQtQtQt#La7.i.i.i.i.u.w#O#O#O#O#O#O.x.i.i.i.i#qapQt#L#N.i.i.i.ia8.B.B.B.Ba9#O#O.x.i.i.i.i.i.i.i.u.w#Oa9.B.B.B.Ba8.i.i.i.i",
+"QtQtQtQtQtQtQtaf.i.i.i.ib..B.B.B.B.B.B.B.B.B#3.i.i.i.i.lQt.##X.i.iayb#.B.B.B.B.B.B.B.B.B#3.i.i.i.i.ib..B.B.B.B.B.B.B.B.Baeay.i.i",
+"QtQtQtQtQtQtQtba.i.i.ibb.B.B.B.B.B.B.B.B.B.B.Bbc.i.i.i.i#Abd.i.i.i#5.B.B.B.B.B.B.B.B.B.B.Ba9.i.i.ibb.B.B.B.B.B.B.B.B.B.B.B#7.i.i",
+"QtQtQtQtQtQtQt.b.i.i.ian.B.B.B.B.B.B.B.B.B.B.B.7.x.i.i.ia6be#X.i.i.Zbf.B.B.B.B.B.B.B.B.B.B#V.i.i.iad.B.B.B.B.B.B.B.B.B.Ba8.Z.i.i",
+"QtQtQtQtQtQtQtbg.i.i.iat.B.B.B#Sbhajajbi#S.B.B.Bbj.i.i.i.i.i.j.i.i.i.Zbkakajajajbl.B.B.B#t#u.i.i.x.7.B.B.Bbmajajajajakaj.Z.i.i.i",
+"QtQtQtQtQtQtQt.8.i.i.i#u#t.B.B.Bbn.i.i.i#Z.B.B.B.Bbo.i.i.i.i.i.i.i.i.i.i.i.i.i#V.B.B.B.Bbn.i.i.i#f.B.B.B#t#u.i.i.i.i.i.i.i.i.i.i",
+"QtQtQtQtQtQtQt#L.n.i.i.i#Z.B.B.B.7.x.i.i#ubp.B.B.B.Bbq.i.i.i.i.i.i.i.i.i.i.i#9.B.B.B.B#t#u.i.i.x.7.B.B.Bbn.i.i.i.i.i.i.i.i.ibr#K",
+"QtQtQtQtQtQtQtQtbs.i.i.i#u#t.B.B.Bbn.i.i.ibt#t.B.B.B.B.N.J.i.i.i.i.i.i.i.v.C.B.B.B.Bbubt.i.i.i#f.B.B.B#t#u.i.i.i.i.i.i.i#qaGaHQt",
+"QtQtQtQtQtQtQtQt.##q.i.i.i#Z.B.B.B#m.J.i.i.ibv#t.B.B.B.B.B.Nbw.I.I.I.z.C.B.B.B.B.B#tbt.i.i.i.Jbx.B.B.Bbn.i.i.i#qby#F.mbz.#QtQtQt",
+"QtQtQtQtQtQtQtQtQtbA.i.i.i#u#t.B.B.B#s.x.i.i.ibtbB.B.B.B.B.B.B.B.B.B.B.B.B.B.B.B.Mbt.i.i.i.x.7.B.B.B#v#u.i.i.ibCQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQt.##q.i.i.i#B#p.B.B.Bbj.i.i.i.i.ZbD.U.B.B.B.B.B.B.B.B.B.B.B.X.5.Z.i.i.i.i#b.B.B.B#m#D.i.i.i#X#kQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtbE.i.i.i.ibF.B.B.B.Bbo.i.i.i.i.i.ZbDbG.B.B.B.B.B.B.B.M.5.Z.i.i.i.i.i#V.B.B.B.Bbn.i.i.i.ibaQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQt.GbH.i.i.i#ubp.B.B.B.Bbq.i.i.i.i.i.i.ZbIbDbDbDbDbDbJ.Z.i.i.i.i.i.i#9.B.B.B.B#t#u.i.i.i#a.GQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQt##.j.i.i.ibt#t.B.B.B.B.N.J.i.i.i.i.i.i.i.i.i.i.i.i.i.i.i.i.i.v.C.B.B.B.Bbubt.i.i.iaF.8QtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtbK.i.i.i.ibv#t.B.B.B.B.B.N.J.i.i.i.i.i.i.i.i.i.i.i.i.i.v.C.B.B.B.B.B#tbt.i.i.i.ibLQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQt.GbM.i.i.i.ibtbB.B.B.B.B.B.B.Nbw.x.i.i.i.i.i.i.i.u.z.C.B.B.B.B.B.B.Mbt.i.i.i.ibN.GQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQt.GbO.i.i.i.i.ZbD.U.B.B.B.B.B.B.B.Mbw.I.w.I.zbP.B.B.B.B.B.B.B.X.5.Z.i.i.i.ibQ.GQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQt.GbR.i.i.i.i.i.ZbD.U.B.B.B.B.B.B.B.B.B.B.B.B.B.B.B.B.B.X.5.Z.i.i.i.i.i.O.GQtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQt.G.H.i.i.i.i.i.i.ZbDbG.B.B.B.B.B.B.B.B.B.B.B.B.B.M.5.Z.i.i.i.i.i.ibS.GQtQtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtbTbU.i.i.i.i.i.i.ZbV.TbB.B.B.B.B.B.B.B.M.T.Y.Z.i.i.i.i.i.ibWbXQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtbY.r.i.i.i.i.i.i.i.ZbIbDbZ.SbZbDbJ.Z.i.i.i.i.i.i.ibWb0QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtbY.r.i.i.i.i.i.i.i.i.i.i.i.i.i.i.i.i.i.i.ib1b0QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtb2b3.j.i.i.i.i.i.i.i.i.i.i.i.i.i.i.nb4QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt.#b5.r.j.i.i.i.i.i.i.i.i.hb6.#QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt"};
+"""
 
 __icon__ = """
 /* XPM */
@@ -2724,6 +4639,578 @@ static char *dummy[]={
 "................................................................",
 "................................................................"};
 
+"""
+
+import_sketch_icon = """
+/* XPM */
+static char *dummy[]={
+"64 64 392 2",
+"## c #008686",
+"dv c #008787",
+"c9 c #008888",
+"dj c #008989",
+"dw c #008a8a",
+"#D c #008b8b",
+"#Q c #008c8c",
+"au c #008d8d",
+"aM c #008e8e",
+"bb c #008f8f",
+"bj c #009090",
+"bx c #009191",
+"bH c #009292",
+"ds c #009393",
+"bX c #009494",
+"b5 c #009595",
+"dX c #009696",
+"ce c #009797",
+"cn c #009898",
+"co c #009a9a",
+"cf c #009c9c",
+"b6 c #009e9e",
+"bO c #00a0a0",
+"bI c #00a2a2",
+"by c #00a4a4",
+"dT c #00a5a5",
+"bk c #00a6a6",
+"dJ c #00a7a7",
+"dZ c #00a8a8",
+"a3 c #00a9a9",
+"aV c #00aaaa",
+"dQ c #00acac",
+"#a c #00adad",
+"#r c #00aeae",
+"#q c #00afaf",
+"ak c #00b0b0",
+"#. c #00b1b1",
+"ab c #00b2b2",
+"#2 c #00b4b4",
+"#R c #00b5b5",
+"dG c #00b6b6",
+"#E c #00b7b7",
+"#C c #00b9b9",
+"#P c #00baba",
+"#1 c #00bbbb",
+"c4 c #00bcbc",
+"aa c #00bdbd",
+"at c #00bebe",
+"dc c #00bfbf",
+"aL c #00c0c0",
+"ba c #00c2c2",
+"bG c #00c3c3",
+"bW c #00c4c4",
+"dz c #00c5c5",
+".M c #00c6c6",
+"dB c #01c6c6",
+"dR c #02c7c7",
+"#B c #03c3c3",
+"dO c #06c7c7",
+"du c #0bc8c8",
+"dM c #0cc9c9",
+"#O c #0dbbbb",
+"di c #10b4b4",
+"dK c #11caca",
+"do c #12caca",
+"#0 c #17b4b4",
+"a# c #19b3b3",
+"c7 c #1ba8a8",
+"as c #1bb1b1",
+"dI c #1bcccc",
+"aB c #1dafaf",
+"dt c #1ecece",
+"c3 c #1faeae",
+"aK c #20adad",
+"#b c #21acac",
+"aU c #22acac",
+"dC c #23cece",
+".9 c #25cccc",
+"b# c #26a9a9",
+"dm c #26cece",
+"d. c #27a6a6",
+"df c #28cece",
+"dp c #28cfcf",
+"db c #28d0d0",
+"bi c #29a7a7",
+"bw c #2ea3a3",
+"c2 c #319f9f",
+"cC c #339292",
+"bF c #339f9f",
+"cy c #34a5a5",
+"cx c #368787",
+"bV c #379b9b",
+"b4 c #3e9696",
+"b7 c #3f7b7b",
+"dA c #3fd4d4",
+"cd c #439292",
+"ct c #468c8c",
+"cB c #48b5b5",
+"dY c #48d7d7",
+"cu c #49d5d5",
+"cm c #4a8c8c",
+"bz c #4d6868",
+"cg c #50c5c5",
+"dF c #51d9d9",
+"cp c #52d8d8",
+"c5 c #55d9d9",
+"dd c #5bd9d9",
+"dx c #5cdbdb",
+"dy c #5ddada",
+"dW c #5ddbdb",
+"cH c #5fd7d7",
+"d2 c #63dcdc",
+"bP c #687575",
+"dH c #68dcdc",
+"cM c #68dede",
+"d1 c #6adfdf",
+"cU c #6b7474",
+"dl c #6edede",
+"bJ c #706f6f",
+"c1 c #70dfdf",
+"#F c #727c7c",
+"bl c #75c8c8",
+"d0 c #78e0e0",
+"c6 c #78e1e1",
+"#N c #7a3131",
+"dk c #815959",
+"de c #81e3e3",
+"#s c #853e3e",
+"cP c #892a2a",
+"a4 c #89e5e5",
+"cD c #8e1212",
+"#m c #8f0606",
+"cs c #901414",
+"#e c #910505",
+"#t c #910d0d",
+".j c #920404",
+"b9 c #920505",
+"#w c #920e0e",
+"aW c #92e7e7",
+".o c #930303",
+"aE c #930404",
+"an c #930707",
+"az c #930c0c",
+"aG c #940c0c",
+"#X c #941010",
+"cw c #960e0e",
+".k c #970000",
+".i c #971717",
+".p c #971818",
+"eb c #980000",
+"#l c #981e1e",
+"ec c #990000",
+".B c #991b1b",
+"#f c #991d1d",
+".G c #992020",
+".N c #993e3e",
+"c8 c #9a0c0c",
+".t c #9a1b1b",
+".U c #9a4d4d",
+"aN c #9ae8e8",
+".T c #9be9e9",
+"bM c #9c1919",
+"aO c #9d1919",
+"d3 c #9de9e9",
+".l c #9f0000",
+".n c #a00000",
+"cO c #a00a0a",
+"#A c #a0d0d0",
+"aC c #a0eaea",
+"bs c #a20000",
+".u c #a20202",
+"bt c #a30000",
+"cb c #a31010",
+"#9 c #a31414",
+"cj c #a31515",
+"ae c #a33636",
+".m c #a40000",
+"b1 c #a50000",
+"ag c #a51414",
+"bT c #a60000",
+"aI c #a60404",
+"ax c #a63d3d",
+"dh c #a65252",
+"b2 c #a70000",
+"cA c #a70101",
+"#L c #a70202",
+"aP c #a70404",
+"#Z c #a72222",
+"aX c #a83838",
+"ap c #a83d3d",
+"al c #a8ebeb",
+".Z c #a90000",
+"cY c #a9ecec",
+".Q c #aa0505",
+".H c #ac0000",
+".J c #ad0000",
+".0 c #ae0000",
+".h c #ae4a4a",
+".q c #ae4c4c",
+".Y c #af0000",
+"ai c #af0101",
+"cV c #af3e3e",
+"d# c #b02222",
+"bY c #b05151",
+"ac c #b0eded",
+"cT c #b23c3c",
+"#I c #b25454",
+"dD c #b2eeee",
+".L c #b4eeee",
+"#U c #b50202",
+"#p c #b5eeee",
+"da c #b60000",
+"cE c #b65b5b",
+"#g c #b65d5d",
+"#k c #b65e5e",
+"cr c #b76060",
+"#3 c #b7efef",
+"b8 c #b80000",
+"#J c #b80101",
+"ck c #b86060",
+"#Y c #b86565",
+"dV c #b9f0f0",
+"b0 c #ba0000",
+"a7 c #ba0101",
+"#7 c #ba6565",
+"bc c #ba6767",
+"a2 c #bb0202",
+"bR c #bb6666",
+"bd c #bb6868",
+"a9 c #bc0000",
+"#S c #bcecec",
+"cW c #bd0000",
+"aS c #bd0303",
+"bp c #be0202",
+"aZ c #be0303",
+"av c #be6a6a",
+"e# c #bf6464",
+"e. c #bf6666",
+"ed c #bf6c6c",
+"ea c #bf6e6e",
+"bA c #bf7171",
+"cX c #bf7474",
+"#d c #c00000",
+"d8 c #c07272",
+"#u c #c07575",
+"bL c #c07676",
+"#x c #c10000",
+"cF c #c10101",
+"bn c #c17171",
+"a5 c #c17474",
+"bC c #c17777",
+"d7 c #c17979",
+"#y c #c20101",
+"bN c #c27a7a",
+"bg c #c37676",
+"br c #c37b7b",
+".6 c #c46b6b",
+"dq c #c4caca",
+"aw c #c50000",
+"cR c #c56d6d",
+"bZ c #c60000",
+".5 c #c60101",
+"cQ c #c60a0a",
+"#o c #c66f6f",
+"cL c #c67070",
+"cl c #c70707",
+"a6 c #c80000",
+"bo c #c90000",
+"#6 c #c90303",
+"d5 c #c9f3f3",
+"bu c #ca0000",
+"cq c #ca0202",
+".s c #ca8888",
+".C c #ca8b8b",
+".E c #caf3f3",
+"bQ c #cb0000",
+"bD c #cd0000",
+"aR c #cd9090",
+"a0 c #cd9191",
+"cN c #ce0202",
+"bq c #ce9494",
+"dU c #cef4f4",
+"#n c #cf0000",
+".R c #cf9494",
+"#4 c #cf9595",
+"#z c #cf9696",
+".1 c #d00000",
+"cG c #d09595",
+"c. c #d09898",
+"a1 c #d09999",
+"bK c #d10000",
+"a8 c #d19898",
+".X c #d20000",
+"#c c #d22323",
+"ch c #d29c9c",
+".v c #d30000",
+".A c #d40000",
+"a. c #d41d1d",
+"d6 c #d4a0a0",
+".8 c #d4f5f5",
+"d4 c #d5f6f6",
+"dS c #d7f6f6",
+"#h c #d8a3a3",
+"#T c #d8a7a7",
+"dr c #d8f7f7",
+"#j c #d9a3a3",
+"dg c #d9c7c7",
+"aq c #da0000",
+"aj c #da1d1d",
+"cK c #daa5a5",
+"cJ c #daa6a6",
+"ao c #daa8a8",
+"ah c #daaaaa",
+"ca c #daacac",
+"ci c #db0000",
+".F c #dbcaca",
+"af c #dc0000",
+".P c #de0000",
+"ar c #de1919",
+"#i c #dfbcbc",
+"dn c #dff7f7",
+"ef c #e1bebe",
+"aA c #e21717",
+"aY c #e40000",
+"aH c #e4c2c2",
+"bS c #e4c5c5",
+"bB c #e50000",
+"c# c #e5c5c5",
+"dE c #e5caca",
+"aJ c #e61414",
+"dP c #e6f9f9",
+"cI c #e70606",
+".g c #e7c6c6",
+".r c #e7c7c7",
+".K c #e7c8c8",
+"bf c #e7caca",
+".d c #e8cccc",
+"aT c #ea1111",
+"#M c #ead4d4",
+".c c #ebd4d4",
+"cZ c #ebfbfb",
+".e c #ecd4d4",
+"b. c #ed0e0e",
+".2 c #ee0000",
+".7 c #eed9d9",
+"cz c #eee6e6",
+".W c #ef0000",
+"bh c #ef0c0c",
+"am c #efdddd",
+"dN c #effbfb",
+"#W c #f00000",
+"cc c #f10404",
+"bv c #f10a0a",
+"#8 c #f1dede",
+".b c #f1e2e2",
+".D c #f1fbfb",
+"ee c #f2e0e0",
+".w c #f30000",
+"bE c #f30a0a",
+"aD c #f3e3e3",
+"bm c #f3e4e4",
+"#G c #f3e5e5",
+"be c #f3e6e6",
+"dL c #f3fdfd",
+".I c #f40000",
+"#H c #f4e6e6",
+".z c #f50000",
+"bU c #f50808",
+"#V c #f60000",
+"#K c #f70000",
+"b3 c #f70606",
+"#v c #f7ebeb",
+".a c #f7efef",
+".4 c #f80000",
+"aF c #f90000",
+".S c #f9f1f1",
+"cv c #f9fdfd",
+".3 c #fa0000",
+".V c #fb0000",
+"ay c #fbf5f5",
+"d9 c #fbf7f7",
+"#5 c #fc0000",
+".x c #fd0000",
+"cS c #fd0202",
+"ad c #fdf7f7",
+".f c #fdf9f9",
+".# c #fdfbfb",
+"c0 c #fdffff",
+".O c #fe0000",
+".y c #ff0000",
+"aQ c #fffdfd",
+"Qt c None",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt.#.a.b.c.d.e.b.a.#QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt.f.g.h.i.j.k.l.m.n.k.o.p.q.r.fQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt.s.t.u.v.w.x.y.y.y.y.y.x.z.A.u.B.CQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt.D.E.F.G.H.I.y.y.y.y.y.y.y.y.y.y.y.y.y.z.J.G.KQtQtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt.L.M.M.M.N.O.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.O.P.Q.R.SQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt.T.M.M.M.M.M.U.y.y.y.V.W.X.Y.Z.0.1.2.3.y.y.y.y.y.4.5.6.7QtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt.8.9.M#.###a.M#b#c.W#d#e#f#g#h#i#j#k#l#m#d.W.y.y.y.y.V#n#o.SQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt#p.M#q#######r.M#s#t#u#vQtQtQtQtQtQtQt#v#u#w#x.y.y.y.y.V#y#zQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt#A#B#C#D#####E.M#F#GQtQtQtQtQtQtQtQtQtQtQt#H#I#J#K.y.y.y.3#L#MQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt.f#N#O#P#Q#####R.M#SQtQtQtQtQtQtQtQtQtQtQtQtQt.f#T#U#V.y.y.y#W#X.fQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt#Y#Z#0#1#Q#####2.M#3QtQtQtQtQtQtQtQtQtQtQtQtQtQtQt#4#x#5.y.y.O#6#7QtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt#8#9a.a#aa#Q####ab.MacQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtadaeaf.y.y.y#Kag#8QtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt.#ahaiaja#aa#Q####ak.MalQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtaman.4.y.y.yaiao.#QtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtapaqarasatau####ak.MalQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtavaw.O.y.yaqaxQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtayaz.VaAaBatau#####r.MaCQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtaDaE#5.y.yaFaGayQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtaHaI.xaJaKaLaM#####a.MaNQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt.SaO.W.y.y.xaPaHQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtaQaRaS#5aTaUaLaM####aV.MaWQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtayaXaY.y.y#5aZa0aQQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQta1a2.xaTaUaLaM####a3.Ma4QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQta5a6.y.y.Oa7a8QtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt.Ra9.yb.b#babb####a3.Ma4QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtbc#n.y.y.y#nbdQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtbe.dbfbfbfbfbfbfbfbfbfbfbfbga2.Obhbibabj####bk.MblbfbfbfbfbfbfbfbfbfbfbfbfbfbfbmQtQtQtbnbo.y.y.xbpbqQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtbr.kbsbtbtbtbtbtbtbtbtbtbtbtbtbu#5bvbwbabx####by.Mbzbtbtbtbtbtbtbtbtbtbtbtbtbtbt.kbAQtayaXbB.y.y#5aSaRaQQtQtQtQtQt",
+"QtQtQtQtQtQtbCbD.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.ybEbFbGbH####bI.MbJ.y.y.y.y.y.y.y.y.y.y.y.y.y.y.ybKbL.SbM.W.y.y.xaIaHQtQtQtQtQtQt",
+"QtQtQtQtQtbNa6.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.ybEbFbGbH####bO.MbP.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.ybQbR.o#5.y.y.VaGayQtQtQtQtQtQt",
+"QtQtQtQtQtbSbT.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.ybUbVbWbX####bO.MbP.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.ZbYbZ.O.y.yaqapQtQtQtQtQtQtQt",
+"QtQtQtQtQtbfbt.y.y.yb0b1b1b1b1b1b1b1b1b1b1b1b2#xb3b4bWb5####b6.Mb7b1b1b1b1b1b1b1b1b1b1b1b1b8.y.y.yb1b9aF.y.y.yaiah.#QtQtQtQtQtQt",
+"QtQtQtQtQtbfbt.y.y.yb1c.c#c#c#c#c#c#c#c#c#c#cacbcccdbWce####cf.Mcgc#c#c#c#c#c#c#c#c#c#c#chbt.y.y.yb1ci.O.y.y#Kcj#8QtQtQtQtQtQtQt",
+"QtQtQtQtQtbfbt.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtQtckclcmbWcn####co.McpQtQtQtQtQtQtQtQtQtQtQtbfbt.y.y.ybK#5.y.y.OcqcrQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtbfbt.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtQt.fcsctbWcn####cnbWcucvQtQtQtQtQtQtQtQtQtQtbfbt.y.y.y#K.y.y.y#Wcw.fQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtbfbt.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtQtQt#Mcx.Mco####cnbWcyczQtQtQtQtQtQtQtQtQtQtbfbt.y.y.y.y.y.y.VcA.eQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtbfbt.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtQtQtQtcB.Mcf####cebWcCcD#u#vQtQtQtQtQtQtQt#vcEbt.y.y.y.y.y.VcFcGQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtbfbt.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtQtQtQtcH.Mb6####b5bWb4cI#d#m#l#kcJ#icK#g#f#e#d.w.y.y.y.y.V#ncL.SQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtbfbt.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtQtQtQtcM.MbO####bXbWbVbU.y.3.2cN.HcOcPcQ.W.V.y.y.y.y.y.3.5cR.7QtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtbfbt.y.y.yb1c#QtQtQtQtQt.D.E.DQtQtQtQtQtcM.MbO####bHbGbFbE.y.ycScTcU.M.M.McV.y.y.y.y.y.ycWcX.SQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtbfbt.y.y.yb1c#QtQtQtQt.L.M.M.McYcZc0QtQtc1.MbI####bHbGc2bE.y.y.yc3.MaLc4.M.M.U.y.y.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtbfbt.y.y.yb1c#QtQtQt.T.M.M.M.M.Mc5QtQtQtc6.Mby####bxbac7c8.A.zc3.Matc9###2.Md.d#da.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtbfbt.y.y.yb1c#QtQt.8db.M#2##bXdc.MddQtQtde.Mbk####bjbadfdgdhdi.Mbadj#######a.Mdkbt.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtbfbt.y.y.yb1c#QtQt.E.M#r######bX.M.MdlQta4.Ma3####bbbadmdndo.MaLc9######c9dcdpdqbt.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtbfbt.y.y.yb1c#QtQtdrdpdcaM######ds.M.Mdla4.Ma3####aMaLdtdu.Matdv######dwat.Mdxbfbt.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtbfbt.y.y.yb1c#QtQtQtdy.Mdzds######ds.M.MdA.MaV####aMaLdB.M#1########c9ba.MdCdDdEbt.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtbfbt.y.y.yb1c#QtQtc0cZdF.M.Mds######ds.M.M.M#a####aMaL.MdG########dvaL.MdCQtc0bfbt.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtbfbt.y.y.yb1c#QtQtQtQtQtdH.M.Mds######ds.M.M#r####auatab##########at.MdIQtQtQtbfbt.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtbfbt.y.y.yb1c#QtQtQtQtQtQtdl.M.Mds######ds.Mak####audJ###########1.MdKdLQtQtQtbfbt.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtbfbt.y.y.yb1c#QtQtQtQtQtQtQtdl.M.Mds######dsak####dj##########dG.MdMdNQtQtQtQtbfbt.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtbfbt.y.y.yb1c#QtQtQtQtQtQtQtQtdl.M.Mds######bb##############ab.MdOdPQtQtQtQtQtbfbt.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtbfbt.y.y.yb1c#QtQtQtQtQtQtQtQtQtdl.M.Mds##################dQ.MdRdSQtQtQtQtQtQtbfbt.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtbfbt.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtdl.M.Mds##############dT.MdBdUQtQtQtQtQtQtQtbfbt.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtbfbt.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtQtdl.M.Mds##########bO.MdBdVQtQtQtQtQtQtQtQtbfbt.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtbfbt.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtQtQtdW.Mdc#Q######dX.M.MaCQtQtQtQtQtQtQtQtQtbfbt.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtbfbt.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtQtQtQtdY.MdzdZ##bHdz.Md0QtQtQtQtQtQtQtQtQtQtbfbt.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtbfbt.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtQtQtc0cZd1.Mdz.Mdc.Md2QtQtQtQtQtQtQtQtQtQtQtbfbt.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtbfbt.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtcY.M.M.Md3d4QtQtQtQtQtQtQtQtQtQtQtbfbt.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtbfbt.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt.Dd5.DQtc0QtQtQtQtQtQtQtQtQtQtQtbfbt.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtbfbt.y.y.yb1chbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfd6bt.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtbfbt.y.y.yb8btbtbtbtbtbtbtbtbtbtbtbtbtbtbtbtbtbtbtbtbtbtbtbtbtbtbtbtbtbtbtbtbtbtda.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtbfbt.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.yb1c#QtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtd7bo.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.ybud8QtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtd9e..1.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.y.ybKe#d9QtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQteaeb.Zb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1.ZecedQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtd9eeefc#c#c#c#c#c#c#c#c#c#c#c#c#c#c#c#c#c#c#c#c#c#c#c#c#c#c#c#c#c#c#c#c#c#c#c#ef#8d9QtQtQtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt",
+"QtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQtQt"};
+
+"""
+
+transformPointsIcon = """
+/* XPM */
+static char *dummy[]={
+"64 64 38 1",
+"c c #8b0000",
+"h c #8e0606",
+"u c #b45c5c",
+"v c #b55757",
+"f c #b55e5e",
+"e c #b65e5e",
+"i c #c04f00",
+"n c #c25000",
+"r c #c25400",
+"d c #c27878",
+"x c #c35706",
+"o c #c45200",
+"s c #c45600",
+"y c #c45a05",
+"A c #c45c06",
+"H c #c47c78",
+"G c #c47d79",
+"b c #c47e7e",
+"k c #c55500",
+"D c #c65d05",
+"B c #c65d06",
+"E c #c75e05",
+"J c #d39c9c",
+"p c #d39e9e",
+"m c #d3a0a0",
+"a c #d5a0a0",
+"I c #d7a7a7",
+"g c #dbafaf",
+"l c #dbb1b1",
+"t c #ddb6b6",
+"q c #dfb7b7",
+"# c #f3e4e4",
+"F c #fbe9e3",
+"C c #fbebe7",
+"z c #fbf3f3",
+"j c #ffaa00",
+"w c #fffbfb",
+". c None",
+"................................................................",
+"................................................................",
+"................................................................",
+"................................................................",
+"................................................................",
+"................................................................",
+"................................................................",
+".................................#a#............................",
+"................................bcccd...........................",
+"...............................ecccccf..........................",
+"..............................ghcijkchl.........................",
+"..............................mcnjjjocp.........................",
+"..............................qhrjjjsht.........................",
+"...............................urjjjsv..........................",
+"...............................wxjjjyz..........................",
+"...............................wAjjjBz..........................",
+"...............................wAjjjBz........#a#...............",
+".............#a#...............wCDjEFw.......bcccd..............",
+"............bcccd................GcH........ecccccf.............",
+"...........ecccccf.........................ghcijkchl............",
+"..........ghcijkchl........................mcnjjjocp............",
+"..........mcnjjjocp........................qhrjjjsht............",
+"..........qhrjjjsht.........................urjjjsv.............",
+"...........urjjjsv..........................wxjjjyz.............",
+"...........wxjjjyz.........#a#..............wAjjjBz.............",
+"...........wAjjjBz........bcccd.............wAjjjBz.............",
+"...........wAjjjBz.......ecccccf............wCDjEFw.............",
+"...........wCDjEFw......ghcijkchl.............GcH...............",
+".............GcH........mcnjjjocp...............................",
+"........................qhrjjjsht...............................",
+".........................urjjjsv................................",
+".........................wxjjjyz................................",
+".........................wAjjjBz................................",
+".........................wAjjjBz...#a#..........................",
+".........................wCDjEFw..bcccd.........................",
+"...........................GcH...ecccccf........................",
+"................................ghcijkchl.......................",
+"................................mcnjjjocp.......................",
+"................................qhrjjjsht.......................",
+".................................urjjjsv..#a#...................",
+".................................wxjjjyz.bcccd..................",
+".......................#a#.......wAjjjBzecccccf.................",
+"......................bcccd......wAjjjBIhcijkchl................",
+".....................ecccccf.....wCDjEFJcnjjjocp................",
+"....................ghcijkchl......GcH.qhrjjjsht................",
+"....................mcnjjjocp...........urjjjsv.................",
+"....................qhrjjjsht...........wxjjjyz.................",
+".....................urjjjsv............wAjjjBz.................",
+".....................wxjjjyz............wAjjjBz.................",
+".....................wAjjjBz............wAjjjBz.................",
+".....................wAjjjBz............wAjjjBz.................",
+".....................wCDjEFw............wCDjEFw.................",
+".......................GcH................GcH...................",
+"................................................................",
+"................................................................",
+"................................................................",
+"................................................................",
+"................................................................",
+"................................................................",
+"................................................................",
+"................................................................",
+"................................................................",
+"................................................................",
+"................................................................",
+"................................................................"};
 """
 
 #UI_FILE created with QtCreator
@@ -3337,10 +5824,10 @@ Must be toolbar / workbench combination selected in the dialog.</string>
         <item>
          <widget class="QPushButton" name="saveExtractedButton">
           <property name="toolTip">
-           <string>If the text is an XPM definition, then you can use this button to save it as a local XPM file and set it up as the Pixmap text.</string>
+           <string>If the text is an XPM or SVG definition, then you can use this button to save it as a local XPM or SVG file and set it up as the Pixmap text.</string>
           </property>
           <property name="text">
-           <string>Save XPM</string>
+           <string>Save</string>
           </property>
          </widget>
         </item>
