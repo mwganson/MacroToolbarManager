@@ -117,7 +117,63 @@ Here is a screenshot:
 
 <img src="MacroToolbarManager_scr03.png">
 
-The tool works by writing text to an image.  You control the text, the color, font, scale, and position with the various widgets in the tool.  You can load an icon to serve as the base image using the Base icon button.  That's how I made the icon with 2 different colors.  First I made the t in blue, and moved it to the left, then saved it as an xpm file.  Then I opened the tool again and selected that file as the base icon file, into which I added the red M.  You can scale by using your mouse's scroll wheel on the label image and you can position the text by dragging with the mouse.  Alternatively, use the spin boxes directly.  The base icon is rescaled to 64 x 64 when you add one, so you can use as large a file as you like, such as a screenshot.
+The integrated icon maker can be used to create your own icons.  It has a layer system where each layer builds on the previous layer.  You put one element per layer, typically.  An element could be a rectangle, some text, a circle, etc.  Then you make a new layer and add the next element.  Changes to the bottom layer automatically get propagated to the top layer, which is a combination of all the previous layers, plus whatever element is added within that top layer.  At the top left corner of the dialog is a green plus button.  Click that button to create a new layer.  You can also create a new layer from the Layer menu.  There are instances where you might have multiple elements in the same layer, for example if you import a sketch or use the rectangles() tool to create multiple rectangles in the same layer.  All elements in a layer share the same color and (optionally) same border color.
+
+You can use construction points to setup your elements.  For example, add 2 construction points (right click on the image label to create a construction point) and use those 2 points for the line() function or for the rectangle() function.  You can also simply add the points as elements to the layer using putpoints(), which adds point elements at those point locations.  Points can be edited after being placed in the Points box, the area at the bottom left of the dialog.  You can move a point, you can remove a point, you can clear all points, and set the color of the points there.  More options are available in the Points menu.  The points themselves are not part of the image that will eventually be produced for the icon.  They're construction mode elements, very similar to the construction mode elements you would use in a sketch.
+
+### File menu
+In the file menu you will find functions generally related to loading and saving files, plus an option to Quit the dialog.
+
+#### Load project and Save project
+Load project loads an icon project you would have saved earlier using Save project.  Projects are saved in text human readable JSON format.  Note: there is no warning if you quit before saving a project.  It's on you to remember to save.
+
+#### Load base pixmap
+You can load a base icon to begin working with.  Internally, each layer has a base pixmap and a pixmap.  The first layer can have an image loaded from disk or a system icon as its base pixmap.  For the other layers, the next lower layer is that layer's base pixmap.  This is quite useful if you have a workbench and you want all the icons to have a similar theme or if you have a similar function that just needs a slightly different icon or if you just want to make some changes to an existing icon.
+
+#### Export XPM, PNG, SVG
+Those are the 3 image options for exporting.  All of them support transparency.  At the bottom left corner of the dialog you will find 2 checkboxes related to using either black, white, or both, as the transparency color.  If you want both white and black in your icon, then you'll need to use a different color for the background, and manually edit the exported XPM code.  This is simple enough -- just find the character being used as the background and change whatever it's hexadecimal color representation is in the XPM code to "None".  The PNG option saves to a file.  The SVG option also saves to a file, but additionally the text making up the SVG file goes into the Extraction Plain Text Edit in the main macro dialog.  From there you can save it as an SVG and have the icon information in the Pixmap line edit filled in for you.  For XPM, it is not saved to a file, but rather it is only put into the Extraction text edit. You save it from there to a file.
+
+### Layer menu
+In this menu you can manage the layers.  You can add a new layer, remove the top layer, or recompute a layer.  Recompute is also available as a toolbar icon.  In some cases you might need to redo the operation rather than simply calling the recompute function.  You can only remove the top layer.  If you want to remove the contents of a layer in the middle of the project, just clear out the Element text edit for that layer.
+
+### Points menu
+In this menu there are functions dealing with points.  These are the construction points used for many element functions.  As stated above, points are not part of the image themselves, but rather are merely ways for you to communicate to the macro how you want the elements, which are part of the image, to be created.
+
+#### Clear points
+Empties out the points list.  Any function that brings in points, such as importing points, will also clear existing points.
+
+#### Remove selected point
+You select a point in the list widget in the Points box area.  When the point is selected it will flash briefly on the image label.  The last point added is always at the top of the list, followed by the previous point, etc.  When you select a point it's coordinates go into the 2 spin boxes in the Points box area, X to the left and y to the right.  You can edit the point coordinates there, and as you do, the point will move in the image label, so that's another way to identify a point selected.  Points cannot be selected in the image label.
+
+#### Duplicate selected point
+This removes the selected point from the list and from the label image.
+
+#### Show points (boolean)
+This is a checked menu item.  If checked, points are shown in the image label, otherwise they are not.  You can also toggle this via the checkbox in the dialog in the Points box area.
+
+#### Apply transformation to points
+This action also has an icon on the toolbar.  It's the one between the sketch import icon and the refresh icon.  This function applies 3 types of transformation to the points: scaling, rotating, and moving, taking the values from the 4 spin boxes just above the Point box area.  Normally, these spin boxes control the positions of elements, but in this case they pull the double duty of providing arguments to the Transform points function.  You need to set them back to their defaults afterwards or else the elments added will also be affected by them.  Use Shift + Command to undo the operation.  Use Alt + Command to keep the existing points in their current location and add new points in the new transformation.  This can be useful for rapidly adding lots of points.  For example, set Y adjust to 1, and press Alt + Transform icon after adding a single point to the screen, and this will make it a sort of Etch-a-sketch operation.  After going in the y direction for a few times, set Y adjust to 0 and X adjust to 1. Now the enter line gets duplicated in the X direction, using the first vertical line as a pen.  You can also use Alt + click on the 2 spin boxes in the Point box area to make use of this feature, but on an individual point level.
+
+##### Rotating
+Rotating is the first operation performed in a transformation.  Rotating first, then moving, and finally scaling.  Use the angle spin box to set the angle for the rotation.  This tends to work best with 90 degree angles.  That's because every point has to align with an integer value, and they are rounded to the nearest integer to make that happen.  At 90 degrees, 180 degrees, and 270 degrees they all always land on integer values and no rounding is needed, so there is no information lost in the rotation.  These losses get multiplied if you do the rotation in several steps, for example, moving 5 degrees at a time 3 times for a 15 degree move.  It is better instead to undo the previous 5 degree move with Shift + Transform, and then change the angle to 15 so you can do it all in one go.  (Unless you are using Alt + Command to add the new points at each stage.)
+
+##### Moving (translating)
+Set the X adjust and Y adjust spin boxes to set up the move, and then apply the transformation.  If scale is 1.0 and Angle is 0, then only a translation is done.
+
+##### Scaling
+Scaling is done relative to the center of the icon label, which is (32,32).  The origin in this coordinate system is to the upper left corner at (0,0), and the lower right corner is at (63,63).  Points furthere away from the center should be expected to move more with scaling than points neared to the center.  A point at the center should not move at all during scaling.  So, you might want to center your points first before scaling.
+
+#### Backup points in memory / Restore points from memory
+There is one storage slot available to store points in memory using this feature.  For undoing transformations, the slots are unlimited.  You can undo as many transformations as you like until you have undone them all.  Points stored in memory are transient, meaning they do not survive saving and loading the project.  It's just a temporary place to put some points for later recovery.  Each layer has its own storage slot.  Use the clipboard option to share points from one layer to another.
+
+#### Copy points to clipboard / Paste points from clipboard
+Self-explanatory.  Points are stored in text format on the clipboard.  You can paste them into a text editor to view them and modify them if you like, and then pasted the modified points back in.  Or you can save them to disk in a text file, if you like.  You could create a library of points, such as arrows, etc., and store them all in a text file for later retrieval via the clipboard.  You can also use the Load and Save points discussed below.
+
+#### Import discretized edges of object
+This lets you import selected edges of an object as discretized points, one point per millimeter of length of the edge.  Ensure the edges are all on or parallel to the xy plane or else you are likely to have an unexpected result.  All the z values are ignored during the import, effectively projecting the points to the xy plane.  If the edges are rotate relative to that plane, then the imported points will be distorted.  For example, a rotated cylinder's round top edge might come in as an ellipse if the cylinder is rotated about something other than the z axis.  In some cases this might be exactly what you want.  You should limit this to only one wire, or one set of connected edges.  Otherwise when you apply polyline() to the points you would get crossed lines connecting the wires where one point was the last point of one wire and the next point was the first point of the next wire.  The edges do not have to be on the same plane.
+
+#### Import selected vertices
+This lets you import selected vertices from one or more objects.  Like the disretized edges import these are also relative to the xy plane.
 
 The text field supports using \n for a newline if you want more than a single line of text, but a maximum of only 2 lines are supported.  You can make a base image of the current icon, and then use it as the base icon to add more lines if you like.  Empty the text field, load in an image as Base icon, and export it as an XPM file to use this tool as an XPM converter that works well with FreeCAD.
 
