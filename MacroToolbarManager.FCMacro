@@ -4,7 +4,7 @@
 #
 #Goal is to make it simpler and easier to manage custom
 #macros on custom toolbars
-__version__ = "0.2023.10.19"
+__version__ = "0.2023.10.20"
 
 LOAD_STRING = True #load UI from a string defined in this file if True,
                    #else from a separate ui file during development
@@ -21,6 +21,7 @@ import time
 import numpy as np
 import math
 import json
+import Mesh,MeshPart
 
 __dir__ = FreeCAD.getUserMacroDir(True)
 __Requires__ = 'opencv-python'
@@ -415,31 +416,53 @@ class CustomToolbarEditor(QtGui.QWidget):
                     newPoints = self.remove_consecutive_duplicates(newPoints)
                     self.addPoints(newPoints)
 
+            def importPointsFromFacesTriggered(self):
+                """discretize the faces, in a manner of speaking.  We make them into meshes
+                and then get those points."""
+                selx = FreeCADGui.Selection.getCompleteSelection()
+                if not selx:
+                    self.iconEditor.statusBox.setText("Select one or more faces to discretize.")
+                    return
+                points = []
+                for sel in selx:
+                    if not sel.Object.isDerivedFrom("Part::Feature"):
+                        self.iconEditor.statusBox.setText(f"Must be a part feature, found: {sel.Object.TypeId}.")
+                        continue
+                    if sel.SubElementNames[0]:
+                        face = sel.SubObjects[0]
+                        if hasattr(face, "Faces") and face.Faces and face.Area == face.Face1.Area:
+                            mesh = MeshPart.meshFromShape(face, Fineness = 0, MaxLength = 1, AllowQuad = 1)
+                            pts = [(int(round(p.Vector[0])),int(round(p.Vector[1]))) for p in mesh.Points]
+                            points.extend(pts)
+                    else: #whole object selected
+                        for face in sel.Object.Shape.Faces:
+                            mesh = MeshPart.meshFromShape(face, Fineness = 0, MaxLength = 1, AllowQuad = 1)
+                            pts = [(int(round(p.Vector[0])),int(round(p.Vector[1]))) for p in mesh.Points]
+                            points.extend(pts)
+                points = self.mirror_in_y_direction(points)
+                #points = self.remove_consecutive_duplicates(points)
+                points = list(set(points)) #remove all duplicates
+                self.addPoints(points)
+                self.showPoints()
             def importVerticesTriggered(self):
                 """Import vertices selected vertices"""
                 selx = FreeCADGui.Selection.getCompleteSelection()
                 if not selx:
-                    self.iconEditor.statusBox.setText("Select some vertices to import into the points and try again.\n")
+                    self.iconEditor.statusBox.setText("Select some edges to discretize and import.\n")
                     return
-                if bool(selx[0].SubElementNames[0]):
-                    self.iconEditor.statusBox.setText("Importing selected vertices.  You can use these with polyline() to \n" +\
-                                            "connect them together or one of the other element functions.")
-                    points = []
-                    for sel in selx:
+                points = []
+                for sel in selx:
+                    if sel.SubElementNames[0]:
                         for v in sel.SubObjects:
                             if hasattr(v,"X"):
                                 p = (int(round(v.X)),int(round(v.Y)))
                                 points.append(p)
-                    points = self.mirror_in_y_direction(points)
-                    points = self.remove_consecutive_duplicates(points)
-                else:
-                    self.iconEditor.statusBox.setText("Importing all vertices of the selected objects, projected to the xy plane.\n" +\
-                                            "Any consecutive duplicates will be removed.")
-                    for sel in selx:
-                        points = [v.Point for v in sel.Object.Shape.Vertexes if hasattr(sel.Object,"Shape")]
-                        points = [(int(round(p[0])),int(round(p[1]))) for p in points]
-                        points = self.mirror_in_y_direction(points)
-                    points = self.remove_consecutive_duplicates(points)
+                    else:
+                        pts = [v.Point for v in sel.Object.Shape.Vertexes if hasattr(sel.Object,"Shape")]
+                        pts = [(int(round(p[0])),int(round(p[1]))) for p in pts]
+                        points.extend(pts)
+                points = self.mirror_in_y_direction(points)
+                points = self.remove_consecutive_duplicates(points)
                 self.addPoints(points)
                 self.showPoints()
 
@@ -481,39 +504,42 @@ class CustomToolbarEditor(QtGui.QWidget):
                 return result
 
             def importDiscretizedEdgesTriggered(self):
-                """import points by discretizing edges of selected object"""
-                selx = FreeCADGui.Selection.getSelectionEx()
+                """import points by discretizing selected edges or objects"""
+                selx = FreeCADGui.Selection.getCompleteSelection()
                 if not selx:
-                    self.iconEditor.statusBox.setText("Select an object from which to import the points and try again.")
-                    return
-                if len(selx) > 1:
-                    self.iconEditor.statusBox.setText("Select only one object.")
-                    return
-                obj = selx[0].Object
-                if not obj.isDerivedFrom("Part::Feature"):
-                    self.iconEditor.statusBox.setText("Selected object must be a Part feature.")
+                    self.iconEditor.statusBox.setText("Select some edges to discretize and import.\n")
                     return
                 points = []
-                if not selx[0].HasSubObjects:
-                    edges = obj.Shape.Edges
-                else:
-                    edges = selx[0].SubObjects
-                for edge in edges:
-                    length = int(round(edge.Length))
-                    if length:
-                        pts = edge.discretize(length)
-                        pts = [(int(round(p[0])),int(round(p[1]))) for p in pts]
-                        pts = self.mirror_in_y_direction(pts)
-                        points.extend(pts)
-                points = self.remove_consecutive_duplicates(points)
+                for sel in selx:
+                    if sel.SubElementNames[0]:
+                        for sub in sel.SubObjects:
+                            if hasattr(sub,"Length"):
+                                length = sub.Length
+                                print(f"sub.Length = {sub.Length}")
+                                if hasattr(sub,"discretize"):
+                                    pts = sub.discretize(int(length))
+                                    print(f"len(pts): {len(pts)}")
+                                    pts = [(int(round(v[0])),int(round(v[1]))) for v in pts]
+                                    if points:
+                                        if points[-1] != pts[0]:
+                                            pts = reversed(pts)
+                                    pts = self.mirror_in_y_direction(pts)
+                                    pts = self.remove_consecutive_duplicates(pts)
+                                    points.extend(pts)
+                    else:
+                        edges = sel.Object.Shape.Edges
+                        for edge in edges:
+                            length = edge.Length
+                            pts = edge.discretize(int(length))
+                            pts = [(int(round(v[0])),int(round(v[1]))) for v in pts]
+                            if points:
+                                if points[-1] != pts[0]:
+                                    pts = reversed(pts)
+                            pts = self.mirror_in_y_direction(pts)
+                            pts = self.remove_consecutive_duplicates(pts)
+                            points.extend(pts)
                 self.addPoints(points)
                 self.showPoints()
-                if not selx[0].HasSubObjects and len(obj.Shape.Wires) > 1:
-                    self.iconEditor.statusBox.setText("Input object has multiple wires.  It is generally recommended to only\n"+\
-                                                      "use objects with single wires. You can also select the edges to use.")
-                elif points:
-                    self.iconEditor.statusBox.setText("Now you can use polylines() on these points.")
-
 
             def pastePointsTriggered(self):
                 clip = QtGui.QClipboard()
@@ -684,8 +710,8 @@ class CustomToolbarEditor(QtGui.QWidget):
                 """duplicate selected point, adds to top of list"""
                 row = self.list_widget.currentRow()
                 pts = self.getPoints()
-                pts = [pts[row]] + pts
-                self.addPoints(pts)
+                pt = [pts[row]]
+                self.addNewItem(pt)
                 self.showPoints()
 
             def flashPoint(self, row):
@@ -708,15 +734,8 @@ class CustomToolbarEditor(QtGui.QWidget):
                 row = self.list_widget.currentRow()
                 self.flashingBlocked = True
                 self.list_widget.takeItem(row)
+                self.relabelList(row)
                 self.flashingBlocked = False
-                pts = self.getPoints()
-                if not pts:
-                    self.showPoints()
-                    return
-                else:
-                    self.addPoints(pts)
-                    self.select(row)
-                    pass
                 self.showPoints()
 
             def select(self,row):
@@ -758,11 +777,26 @@ class CustomToolbarEditor(QtGui.QWidget):
                 self.signalsBlocked = False
 
             def addPoints(self, pts):
+                pb = None
+                if len(pts) > 500:
+                    pb = QtGui.QProgressDialog(f"Adding {len(pts)} points", "Cancel", 0, len(pts))
+                    pb.setWindowModality(QtCore.Qt.WindowModal)
+                    pb.show()
+
                 self.list_widget.clear()
                 self.flashingBlocked = True
-                for pt in pts:
+                self.list_widget.blockSignals(True)
+                for ii,pt in enumerate(pts):
                     self.addNewItem(pt)
+                    if pb and ii % 10 == 0:
+                        pb.setValue(ii)
+                        FreeCADGui.updateGui()
+                        if pb.wasCanceled():
+                            break
                 self.flashingBlocked = False
+                self.list_widget.blockSignals(False)
+                if pb:
+                    pb.close()
 
 
             def parseItem(self, item):
@@ -790,10 +824,18 @@ class CustomToolbarEditor(QtGui.QWidget):
                     point_list.append(pt)
                 return point_list
 
+            def relabelList(self, from_row):
+                pts = self.getPoints()
+                for rr in range(from_row, self.list_widget.count()):
+                    item = self.list_widget.item(rr)
+                    new_text = f"{rr}: ({pts[rr][0]},{pts[rr][1]})"
+                    item.setText(new_text)
+
             def insertNewItem(self, pt, row):
                 txt = f"{row}: ({pt[0]},{pt[1]})"
                 item = QtGui.QListWidgetItem(txt)
                 self.list_widget.insertItem(row,item)
+                self.relabelList(row)
                 self.select(row)
 
             def addNewItem(self, pt):
@@ -1082,7 +1124,7 @@ class CustomToolbarEditor(QtGui.QWidget):
                 self.iconLabel.setStyleSheet("background-color: lightgray;")
                 self.iconLabel.setContentsMargins(2,2,2,2)
                 self.iconLabel.setAlignment(QtCore.Qt.AlignCenter)
-                self.iconLabel.setToolTip("Right click to add construction point")
+                self.iconLabel.setToolTip("Right-click to add construction point, Shift + Right-click to select an existing point.")
                 self.iconLabel.setSizePolicy(QtGui.QSizePolicy.MinimumExpanding, QtGui.QSizePolicy.MinimumExpanding)
                 self.layout.addWidget(self.iconLabel, 0, 4, 10, 3)
                 self.pixmap = None
@@ -1216,6 +1258,10 @@ class CustomToolbarEditor(QtGui.QWidget):
                 importVerticesAction = QtGui.QAction("Import selected vertices", self.pointsMenu)
                 importVerticesAction.triggered.connect(self.pointsBox.importVerticesTriggered)
                 self.pointsMenu.addAction(importVerticesAction)
+
+                importDiscretizedFacesAction = QtGui.QAction("Import points from faces", self.pointsMenu)
+                importDiscretizedFacesAction.triggered.connect(self.pointsBox.importPointsFromFacesTriggered)
+                self.pointsMenu.addAction(importDiscretizedFacesAction)
 
                 geometryFromSketchAction = QtGui.QAction("Geometry from sketch", self.pointsMenu)
                 geometryFromSketchAction.triggered.connect(self.pointsBox.geometryFromSketchTriggered)
@@ -1637,6 +1683,10 @@ class CustomToolbarEditor(QtGui.QWidget):
                 self.pointsBox.addPoints(pts)
                 self.pointsBox.showPoints()
 
+            def addAClick(self, pt):
+                self.pointsBox.insertNewItem(pt,0)
+                self.pointsBox.showPoints()
+
             def exportSVG(self):
                 """first we make it ionto the xpm with transparent background, then make a pixmap
                    back out of the xpm and use that to export to svg"""
@@ -1846,6 +1896,7 @@ class CustomToolbarEditor(QtGui.QWidget):
                             #return True  # Consume the event
                             return super().eventFilter(obj, event)
                         elif event.button() == QtCore.Qt.RightButton:
+                            modifiers = QtGui.QApplication.keyboardModifiers()
                             # Get the size of the image
                             image_width = self.pixmap.width() #always 64,64
                             image_height = self.pixmap.height()
@@ -1860,8 +1911,21 @@ class CustomToolbarEditor(QtGui.QWidget):
                             posX = event.pos().x() //self.zoomFactor - x_margin
                             posY = event.pos().y() //self.zoomFactor - y_margin
 
-                            self.lastClicks = [(posX,posY)] + self.lastClicks #[0] is most recent, [1] was previous click
-                            self.pointsBox.showPoints()
+                            #self.lastClicks = [(posX,posY)] + self.lastClicks #[0] is most recent, [1] was previous click
+                            if not modifiers == QtCore.Qt.ShiftModifier:
+                                self.addAClick((posX,posY))
+                                self.statusBox.setText(f"Added new point: ({posX},{posY}).  Shift + Right-click to select\n"+\
+                                                                  "an existing point.")
+                                self.pointsBox.showPoints()
+                            else:
+                                pts = self.lastClicks
+                                pt = (posX,posY)
+                                print(f"pt = {pt}")
+                                if pt in pts:
+                                    self.pointsBox.select(pts.index(pt))
+                                    self.statusBox.setText(f"({posX},{posY}) selected at row: {pts.index(pt)}")
+                                else:
+                                    self.statusBox.setText(f"({posX},{posY}) not found in points list.")
                             self.iconLabel.setToolTip("") #gets annoying and in the way at times
                             return super().eventFilter(obj, event)
                     elif event.type() == event.MouseMove:
