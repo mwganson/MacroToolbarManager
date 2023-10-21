@@ -111,15 +111,15 @@ Note: This button also has a context menu.  Use this to browse for system icons,
 All image files are parsed, but we only keep those that are 64 x 64 pixels are smaller for use as icons.
 
 #### Make icon (button)
-The macro provides a simple icon creator tool that you can use to make your own simple icons.  I used it, in fact, to make the xpm version of the icon for this macro, the blue t and the red M.  This functino makes use of openCV python package.  It comes bundled with FreeCAD, but if you self-compile you might not have it installed.  You can install with pip as pip install opencv-python.
+The macro provides an icon creator tool that you can use to make your own simple icons.  I used it, in fact, to make the xpm version of the icon for this macro, the blue t and the red M.  This function makes use of openCV python package.  It comes bundled with FreeCAD, but if you self-compile you might not have it installed.  You can install with pip as pip install opencv-python.
 
 Here is a screenshot:
 
 <img src="MacroToolbarManager_scr03.png">
 
-The integrated icon maker can be used to create your own icons.  It has a layer system where each layer builds on the previous layer.  You put one element per layer, typically.  An element could be a rectangle, some text, a circle, etc.  Then you make a new layer and add the next element.  Changes to the bottom layer automatically get propagated to the top layer, which is a combination of all the previous layers, plus whatever element is added within that top layer.  At the top left corner of the dialog is a green plus button.  Click that button to create a new layer.  You can also create a new layer from the Layer menu.  There are instances where you might have multiple elements in the same layer, for example if you import a sketch or use the rectangles() tool to create multiple rectangles in the same layer.  All elements in a layer share the same color and (optionally) same border color.
+The integrated icon maker can be used to create your own icons.  It has a layer system where each layer builds on the previous layer.  You put one element per layer, typically.  An element could be a rectangle, some text, a circle, etc.  Then you make a new layer and add the next element.  Changes to the bottom layer automatically get propagated to the top layer, which is a combination of all the previous layers, plus whatever element is added within that top layer.  At the top left corner of the dialog is a green plus button.  Click that button to create a new layer.  You can also create a new layer from the Layer menu.  There are instances where you might have multiple elements in the same layer, for example if you import a sketch or use the rectangles() tool to create multiple rectangles in the same layer.  All elements in a layer share the same color and (optionally) the same border color.
 
-You can use construction points to setup your elements.  For example, add 2 construction points (right click on the image label to create a construction point) and use those 2 points for the line() function or for the rectangle() function.  You can also simply add the points as elements to the layer using putpoints(), which adds point elements at those point locations.  Points can be edited after being placed in the Points box, the area at the bottom left of the dialog.  You can move a point, you can remove a point, you can clear all points, and set the color of the points there.  More options are available in the Points menu.  The points themselves are not part of the image that will eventually be produced for the icon.  They're construction mode elements, very similar to the construction mode elements you would use in a sketch.
+You can use construction points to setup your elements.  For example, add 2 construction points (right click on the image label to create a construction point) and use those 2 points for the line() function or for the rectangle() function.  You can also simply add the points as elements to the layer using putpoints(), which adds point elements at those point locations.  Points can be edited after being placed in the Points box, the area at the bottom left of the dialog.  You can move a point, you can remove a point, you can clear all points, and set the color of the points there.  More options are available in the Points menu.  The points themselves are not part of the image that will eventually be produced for the icon.  They're construction mode elements, very similar to the construction mode elements you would use in a sketch.  Right-click to add a new point, Shift + Right-click to select an existing point, or you can also select in the points list widget.
 
 ### File menu
 In the file menu you will find functions generally related to loading and saving files, plus an option to Quit the dialog.
@@ -143,7 +143,7 @@ In this menu there are functions dealing with points.  These are the constructio
 Empties out the points list.  Any function that brings in points, such as importing points, will also clear existing points.
 
 #### Remove selected point
-You select a point in the list widget in the Points box area.  When the point is selected it will flash briefly on the image label.  The last point added is always at the top of the list, followed by the previous point, etc.  When you select a point it's coordinates go into the 2 spin boxes in the Points box area, X to the left and y to the right.  You can edit the point coordinates there, and as you do, the point will move in the image label, so that's another way to identify a point selected.  Points cannot be selected in the image label.
+You select a point in the list widget in the Points box area or by Shift + right-clicking on the image label.  When the point is selected it will flash briefly on the image label.  The last point added is always at the top of the list, followed by the previous point, etc.  When you select a point it's coordinates go into the 2 spin boxes in the Points box area, X to the left and y to the right.  You can edit the point coordinates there, and as you do, the point will move in the image label, so that's another way to identify a point selected.
 
 #### Duplicate selected point
 This removes the selected point from the list and from the label image.
@@ -170,16 +170,102 @@ There is one storage slot available to store points in memory using this feature
 Self-explanatory.  Points are stored in text format on the clipboard.  You can paste them into a text editor to view them and modify them if you like, and then pasted the modified points back in.  Or you can save them to disk in a text file, if you like.  You could create a library of points, such as arrows, etc., and store them all in a text file for later retrieval via the clipboard.  You can also use the Load and Save points discussed below.
 
 #### Import discretized edges of object
-This lets you import selected edges of an object as discretized points, one point per millimeter of length of the edge.  Ensure the edges are all on or parallel to the xy plane or else you are likely to have an unexpected result.  All the z values are ignored during the import, effectively projecting the points to the xy plane.  If the edges are rotate relative to that plane, then the imported points will be distorted.  For example, a rotated cylinder's round top edge might come in as an ellipse if the cylinder is rotated about something other than the z axis.  In some cases this might be exactly what you want.  You should limit this to only one wire, or one set of connected edges.  Otherwise when you apply polyline() to the points you would get crossed lines connecting the wires where one point was the last point of one wire and the next point was the first point of the next wire.  The edges do not have to be on the same plane.
+This lets you import selected edges of one or more objects as discretized points, one point per millimeter of length of the edge.  Ensure the edges are all on or parallel to the xy plane or else you are likely to have an unexpected result.  All the z values are ignored during the import, effectively projecting the points to the xy plane.  If the edges are rotate relative to that plane, then the imported points will be distorted.  For example, a rotated cylinder's round top edge might come in as an ellipse if the cylinder is rotated about something other than the z axis.  In some cases this might be exactly what you want.  You should limit this to only one wire, or one set of connected edges.  Otherwise when you apply polyline() to the points you would get crossed lines connecting the wires where one point was the last point of one wire and the next point was the first point of the next wire.  The edges do not have to be on the same plane.
 
 #### Import selected vertices
-This lets you import selected vertices from one or more objects.  Like the disretized edges import these are also relative to the xy plane.
+This lets you import selected vertices from one or more objects.  Like the disretized edges import these are also relative to the xy plane.  If you select an entire object in the tree view, then you get all of the vertices of that object, but if you select some vertices in the 3d view you get only those selected ones.
 
-The text field supports using \n for a newline if you want more than a single line of text, but a maximum of only 2 lines are supported.  You can make a base image of the current icon, and then use it as the base icon to add more lines if you like.  Empty the text field, load in an image as Base icon, and export it as an XPM file to use this tool as an XPM converter that works well with FreeCAD.
+#### Import points from faces
+This attempts to discretize faces and tries to give you all the points that lie within that face, but it's still not working exactly how I want it to as of version 0.2023.10.20.  It tends to miss the occasional point here or there.
 
-The font choices are limited to those provided by openCV.  There is no way, as far as I know, to add additional fonts.  If you add more text and lose the image, try scaling back until you find it, and then drag to the center and rescale back up.
+#### Load and Save points
+Load or save the points to or from a JSON text file.
 
-There are 2 check boxes that are self-explanatory.  All white and all black colors get set to transparency if these boxes are checked when you export to XPM.  When importing Base icons their transparent backgrounds are represented as black here, and when you start from scratch the background is represented as white here.  Checking and unchecking doesn't change the appearance of the icon in the editor, it just changes the XPM data upon export.
+### Settings menu
+There are only a couple of settings here for the time being, but more are possible to be added in future versions.
+
+#### Font
+Here are the available fonts to be used with text elements.  These are the only ones supported by the OpenCV graphics utility that provides the underlying framework for the graphics.  Of course, with the ability to import sketches and with the ability to convert ShapeStrings into sketches, you can still utilize other fonts, just with a bit more work on your end.
+
+#### Line type
+There are 3 line types available: cv2.LINE_4, cv2.LINE_8, and cv2.LINE_AA (aka cv2.LINE_16).  Line 4 type gives you 4 points: top, right, bottom, and left.  Line 8 gives you the 4 diagonals in addition to the other 4.  Line AA (anti-aliasing) adds (I believe) some additional color depth to make things look better.  This is the default line type.
+
+### Toolbar icons
+There are 3 icons on the toolbar: sketch import, point transformation, and recompute layer.  All 3 were made with the icon maker tool.
+
+### Dialog widgets
+Here in the following section I will discuss the workings of the various widgets in the Icon maker dialog.
+
+#### Status box (label)
+This label has blue text.  Various messages and tips will pop up in here on occasion.  It's worth paying attention to.
+
+#### Add element (combo box)
+This combo box serves as an element menu of sorts.  When you select an item in the combo box it performs that action.  Generally, the action is to add some type of element to the layer.  All of the items that end in () make use of the construction points.  For example, the rectangle() function takes the last two points and uses them to define a rectangle.  Let's take a brief look at all of these elements and what they do.
+
+##### arc
+This adds a default arc element to the image label.  It has a rather long and complicated looking argument list:
+<pre>
+  ellipse(20,30,10,10,0,90,180)
+</pre>
+Wait.  What?  Ellipse?  I thought this was supposed to be an arc?  Well, it is an arc.  It's just behind the scenes we actually use the ellipse function with major radius = minor radius to make this happen.  In this example, 20,30 is the (x,y) location for the center of the arc.  10,10 are the 2 radii, 0 is the angle of rotation for the entire ellipse.  Change this to 90 and see what happens: the arc has rotated clockwise by 90 degrees going from 6 o'clock to 9'oclock position to 9 o'clock to 12 o'clock position.  The last 2 arguments: 90 and 180 are the startAngle and endAngle parameters.  0 degrees is the 3 o'clock position and moves clockwise from there.
+
+##### arc3points() and arc3points2()
+These use construction points to define the arc.  The first point is the start of one edge, the 2nd point is some middle point along the arc, and the 3rd point defines the end of the arc.  The 2 versions make the complementary arcs that would together form an entire circle.  If you don't get the arc you are expecting, try the other one.
+
+##### circle
+This gives you a default circle:
+<pre>
+  circle(32,32,10)
+</pre>
+This puts the center at (32,32) and the radius is 10.
+
+##### circle3points()
+Like the arc3points?() functions this uses 3 points to define the entire circle.
+
+##### clear element box
+This clears the element box, and thus, clears all the elements off the current layer.  It doesn't delete the points.  Use the Clear button in the points box area for that.  This is just a convenience function.  You can do the same thing by manually deleting the text in the Element line edit.
+
+##### ellipse
+This gives you a default ellipse to use as a starting point:
+<pre>
+  ellipse(32,32,10,15,45)
+</pre>
+32,32 is the center of the ellipse.  10 is the major radius, 15 the minor radius, not the there is any distinction in OpenCV as to which is which.  As you can see here, even though the minor is larger than the major, it still works just fine.  The 45 is the rotation of the entire ellipse relative to the vertical.
+
+##### ellipse5points()
+This is a cool function that lets you define an ellipse by 5 points that are contained in its perimeter.  It works quite well, but if you give it an impossible task it will fail.  The 5 points must form an actual ellipse and take care that they are not collinear.
+
+##### floodfill()
+This is a bug.  It should not have the () because it doesn't make use of points.  The floodfill function does the same thing you can do with the paint bucket tool in many graphics applications.  This is the default:
+<pre>
+  floodfill(32,32,20)
+</pre>
+This puts the seed point at 32,32 and uses a tolerance of 20.  The seed point is where the algorithm begins.  It floods everything outward until it reaches a boundary, replacing the color underneath the seed point with the current line color.  The tolerance value tells the algorithm how strictly to look for matching colors to replace.  At 0 it only replaces the exact color, at 255 it replaces everything.  If you find the floodfill function is leaving some colors unchanged that you would like changed, try upping the tolerance value.  80 or so seems to work pretty well, I have found.
+
+##### floodfillall()
+Like floodfill, but uses the construction points to define the seed points.  Each construction point is a seed point.  You don't add the seed points manually, you add them by right-clicking on the icon label.  The floodfill function only takes a single seed point, so this one is far more convenient to use, and you still get the tolerance value to tweak.  Note: don't forget to add a new layer before attempting to do a floodfill or else it will simply replace the existing element.
+
+##### line()
+Makes use of the last 2 construction points to create a line between them.  Note: because it puts those numbers into the Element text field if you move the construction points, then the recompute button doesn't work to update it.  You need to select the line() option again in the Add element combo box.
+
+##### polygon
+This gives you a default regular polygon:
+<pre>
+  polygon(32,32,5,10,45)
+</pre>
+In this example, 32,32 is the center, 5 is the number of sides (a pentagon), 10 is the circumradius (the radius of the circle that contains the 5 points of the pentagon), and 45 is the angle.
+
+##### polyline()
+This is arguably the most useful of the element functions.  Similar to the multiline tool in the sketcher, this uses each point in the construction points list as a reference, drawing a line from one to the next.  If you make it a closed polyline, that is to say, the last point is the same as the first point, then setting the line thickness to -1 will result in a filled shape.  This is generally true of many of the element functions, setting thickness to -1 indicates to fill the interior of the shape.  It only works with closed shapes, and not for all of them.
+
+##### putpoints()
+Puts the construction points into the image as element points.  Remember, the construction points are not part of the image.  This makes them part of the image by creating elements out of them.  Note: since the points are shown as an overlay they might in fact hide the element points.  Toggle the Show points checkbox to see the elements if this happens.
+
+##### rectangle() and rectangles()
+These do essentially the same thing, make rectangles out of the construction points.  The rectangles() function is the more useful of the two because it can make multiple rectangles from multiple sets of construction points.  This is very useful as an eraser if you set the Color to black or white or whatever background color you want to use.  Set thickness to -1 and border to 0, and you have a nice eraser.
+
+##### text
+This is the default.  It's not really needed, but it's there as a reminder that you have this option.  Just type in whatever text you want displayed.
 
 #### Save XPM (button)
 Saves the contents in the Icon information text area as a text file.  You need to supply the .XPM extension.  If it's SVG data, then save in SVG format.  (But I don't think anybody puts SVG data into these __icon__ and __xpm__ fields, as far as I know.
