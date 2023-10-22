@@ -281,6 +281,7 @@ There is a label above the Close button and below the Icon information field whe
 
 
 ## Changelog
+### v2023.10.22b -- don't ask for workbench when creating macro for non-macro action if command begins with "Std_", resize some buttons, minor bug fix
 ### v2023.10.22 -- add feature to create macro for non-macro action to run that action, add ability to extract XPM from current icon,
 ### v2023.10.21 -- add support for non-macro actions, add ability to autoload the current workbench, revised ui, move close button to menu as Quit action
 ### v2023.10.20 -- fix some bugs, add ability to Shift+Right-click to select an existing point, add face import, optimize some point functions.
