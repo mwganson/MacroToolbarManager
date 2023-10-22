@@ -4,7 +4,7 @@
 #
 #Goal is to make it simpler and easier to manage custom
 #macros on custom toolbars
-__version__ = "0.2023.10.22"
+__version__ = "0.2023.10.22b"
 
 LOAD_STRING = True #load UI from a string defined in this file if True,
                    #else from a separate ui file during development
@@ -2688,20 +2688,26 @@ class CustomToolbarEditor(QtGui.QWidget):
 
     def createMacroForAction(self):
         """create a macro for the current non-macro action"""
-        workbenches = [self.form.ComboBoxWorkbench.itemText(i) for i in range(1,self.form.ComboBoxWorkbench.count())]
-        workbenches = ["None - this is a core function"] + workbenches
-        item,ok = QtGui.QInputDialog.getItem(self, "Select workbench", \
+        cmd = self.nonMacroName
+        macroText = ""
+        if not cmd.startswith("Std_"):
+            workbenches = [self.form.ComboBoxWorkbench.itemText(i) for i in range(1,self.form.ComboBoxWorkbench.count())]
+            workbenches = ["None - this is a core function"] + workbenches
+            item,ok = QtGui.QInputDialog.getItem(self, "Select workbench", \
                                   "Select the workbench this command is from, or None if it is a core function:",\
                                    workbenches, 0, editable=False)
-        if not item:
-            return
-        cmd = self.nonMacroName
-        currentWB = FreeCADGui.activeWorkbench().name()
+            if not item:
+                return
 
-        macroText = \
-        f"currentWB = Gui.activeWorkbench().name()\n" +\
-        f"Gui.activateWorkbench('{item}')\n" +\
-        f"Gui.activateWorkbench(currentWB)\n" +\
+
+            currentWB = FreeCADGui.activeWorkbench().name()
+
+            if item != workbenches[0]:
+                macroText += \
+                f"currentWB = Gui.activeWorkbench().name()\n" +\
+                f"Gui.activateWorkbench('{item}')\n" +\
+                f"Gui.activateWorkbench(currentWB)\n"
+        macroText += \
         f"cmd = Gui.Command.get('{cmd}')\n" +\
         "cmd.run(0)\n"
 
@@ -3260,7 +3266,12 @@ class CustomToolbarEditor(QtGui.QWidget):
                          and "select" not in child.objectName()]
         maxWidthButton = self.form.removeMacroFromToolbarButton
         for button in buttons:
-            button.setFixedWidth(maxWidthButton.sizeHint().width()+20)
+            button.setFixedWidth(maxWidthButton.sizeHint().width())
+
+        buttons = [child for child in self.form.findChildren(QtGui.QPushButton)\
+                    if "select" in child.objectName()]
+        for button in buttons:
+            button.setFixedWidth(40)
 
         self.updateMacroNames()
         self.updateNonMacroNames()
@@ -5535,8 +5546,8 @@ UI_FILE = '''<?xml version="1.0" encoding="UTF-8"?>
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>642</width>
-    <height>684</height>
+    <width>645</width>
+    <height>792</height>
    </rect>
   </property>
   <property name="sizePolicy">
@@ -5741,7 +5752,7 @@ UI_FILE = '''<?xml version="1.0" encoding="UTF-8"?>
              <string>Selects the currently installed macro for editing or removing</string>
             </property>
             <property name="text">
-             <string>Select</string>
+             <string/>
             </property>
            </widget>
           </item>
@@ -5873,7 +5884,7 @@ UI_FILE = '''<?xml version="1.0" encoding="UTF-8"?>
           <item>
            <widget class="QPushButton" name="selectNonMacroButton">
             <property name="text">
-             <string>Select</string>
+             <string/>
             </property>
            </widget>
           </item>
@@ -5934,7 +5945,7 @@ UI_FILE = '''<?xml version="1.0" encoding="UTF-8"?>
           <item>
            <widget class="QPushButton" name="selectMacroButton">
             <property name="text">
-             <string>Select</string>
+             <string/>
             </property>
            </widget>
           </item>
@@ -5959,7 +5970,7 @@ Requirements: Menu text must not be empty
 Must be toolbar / workbench combination selected in the dialog.</string>
             </property>
             <property name="text">
-             <string>Add Macro</string>
+             <string>Macro</string>
             </property>
            </widget>
           </item>
@@ -5969,7 +5980,7 @@ Must be toolbar / workbench combination selected in the dialog.</string>
              <string>Remove the macro from the toolbar.  Does not delete the macro action.</string>
             </property>
             <property name="text">
-             <string>Remove macro</string>
+             <string>Macro</string>
             </property>
            </widget>
           </item>
