@@ -281,6 +281,7 @@ There is a label above the Close button and below the Icon information field whe
 
 
 ## Changelog
+### v2023.10.21 -- add support for non-macro actions, add ability to autoload the current workbench, revised ui, move close button to menu as Quit action
 ### v2023.10.20 -- fix some bugs, add ability to Shift+Right-click to select an existing point, add face import, optimize some point functions.
 ### v2023.10.19 -- Svg export, Png export, Construction points, Sketch import, Zooming, too many things to list.
 ### v2023.10.12 -- add border colors to text in icon maker dialog, scale to 256x256 instead of 200x200 for a better 4:1 pixel ratio
