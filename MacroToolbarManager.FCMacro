@@ -42,6 +42,7 @@ class CustomToolbarEditor(QtGui.QWidget):
         self.setAttribute(QtCore.Qt.WA_WindowPropagation,True)
         self.iconMakerTabWidget = None
         self.iconMakerDlg = None
+        self.currentIcon = None
         if not LOAD_STRING:
             self.form = FreeCADGui.PySideUic.loadUi(uiPath + "/custom_toolbar.ui")
         else:
@@ -129,6 +130,7 @@ class CustomToolbarEditor(QtGui.QWidget):
         self.form.LineEditFilter.textChanged.connect(self.startFilterTimer)
         self.form.LineEditShortcut.textChanged.connect(self.onLineEditShortcutTextChanged)
         self.form.makeIconButton.clicked.connect(self.makeSimpleIcon)
+        self.form.extractXPMButton.clicked.connect(self.extractXPMButtonClicked)
 
 
 
@@ -2684,6 +2686,43 @@ class CustomToolbarEditor(QtGui.QWidget):
         self.showMsg(f"Workbench: {self.wbName} set to automatically load on each restart.")
         self.showMsg(f"Use Edit menu -> preferences -> workbenches -> uncheck {self.wbName} Autoload checkbox")
 
+    def createMacroForAction(self):
+        """create a macro for the current non-macro action"""
+        workbenches = [self.form.ComboBoxWorkbench.itemText(i) for i in range(1,self.form.ComboBoxWorkbench.count())]
+        workbenches = ["None - this is a core function"] + workbenches
+        item,ok = QtGui.QInputDialog.getItem(self, "Select workbench", \
+                                  "Select the workbench this command is from, or None if it is a core function:",\
+                                   workbenches, 0, editable=False)
+        if not item:
+            return
+        cmd = self.nonMacroName
+        currentWB = FreeCADGui.activeWorkbench().name()
+
+        macroText = \
+        f"currentWB = Gui.activeWorkbench().name()\n" +\
+        f"Gui.activateWorkbench('{item}')\n" +\
+        f"Gui.activateWorkbench(currentWB)\n" +\
+        f"cmd = Gui.Command.get('{cmd}')\n" +\
+        "cmd.run(0)\n"
+
+        macroDir = FreeCAD.getUserMacroDir(True)
+        fullpath = os.path.join(macroDir, f"{cmd}.FCMacro")
+        if os.path.exists(fullpath):
+            self.showMsg(f"A file named {fullpath} already exists.", "error")
+            self.form.ComboBoxMacroName.setCurrentText(f"{cmd}.FCMacro")
+            return
+        with open(fullpath,"w") as file:
+            file.write(macroText)
+        self.showMsg(f"A file named {fullpath} has been created in your macros directory.")
+        self.updateMacroNames()
+        self.form.ComboBoxMacroName.setCurrentText(f"{cmd}.FCMacro")
+        self.updateLineEditsFromNonMacroCommand(cmd)
+        self.enableNonMacroButtons(False)
+
+
+
+
+
 
     def makeToggler(self,name,value): return lambda: self.setBool(name,value)
 
@@ -2734,6 +2773,10 @@ class CustomToolbarEditor(QtGui.QWidget):
             removeOrphansAction.setEnabled(tm.getOrphans() != [])
             removeOrphansAction.triggered.connect(self.removeOrphans)
         menu.addAction(removeOrphansAction)
+
+        createMacroForAction = QtGui.QAction("Create macro for this non-macro action", menu)
+        createMacroForAction.triggered.connect(self.createMacroForAction)
+        menu.addAction(createMacroForAction)
 
         deleteMacroAction = QtGui.QAction("Delete macro", menu)
         if not self.macroName:
@@ -2974,11 +3017,14 @@ class CustomToolbarEditor(QtGui.QWidget):
         pixmap = self.form.LineEditPixmap.text()
         icon = QtGui.QIcon(pixmap)
         icon2 = QtGui.QIcon(FreeCADGui.getIcon(pixmap))
+        self.currentIcon = None
         if not icon.isNull() and not icon.pixmap(64,64).isNull():
             #self.showMsg(f"valid icon from: {pixmap}")
             self.form.iconLabel.setPixmap(icon.pixmap(64,64))
+            self.currentIcon = icon
         elif not icon2.isNull() and not icon2.pixmap(64,64).isNull():
             self.form.iconLabel.setPixmap(icon2.pixmap(64,64))
+            self.currentIcon = icon2
             if self.isInvalidIcon(icon2.pixmap(64,64)):
                 self.showMsg(f"icon from '{pixmap}' is invalid","warning")
             else:
@@ -3366,6 +3412,25 @@ class CustomToolbarEditor(QtGui.QWidget):
             self.form.LineEditPixmap.setText(file_name)
             self.handlePixmap()
 
+    def extractXPMButtonClicked(self):
+        """extract the XPM data from the current pixmap icon and put it in the extracted
+           plain text edit for saving"""
+        image = self.currentIcon.pixmap(64,64).toImage()
+        buffer = QtCore.QBuffer()
+        buffer.open(QtCore.QBuffer.ReadWrite)
+        image.save(buffer, "XPM")
+
+        # Get the XPM data as bytes
+        xpm_data_bytes = buffer.data()
+
+        # Convert the bytes to a string
+        xpm_data_string = xpm_data_bytes.data().decode('utf-8')
+
+        self.form.PlainTextEditExtracted.setPlainText(xpm_data_string)
+        self.form.saveExtractedButton.setEnabled(True)
+        #FreeCAD.Console.PrintMessage(f"xpm = {xpm_data_string}\n")
+
+
     def saveXPMFile(self, default_folder, default_filename, content):
         file_name, ok = QtGui.QFileDialog.getSaveFileName(None, "Save File As", f"{default_folder}/{default_filename}",
                                                  "Images (*.xpm *.svg);;All Files (*)")
@@ -3411,32 +3476,8 @@ class CustomToolbarEditor(QtGui.QWidget):
             self.form.saveExtractedButton.setEnabled(True)
             self.form.useAsPixmapButton.setEnabled(True)
 
-    def isMacro(self):
-        """checks if the current menu text is from a macro or from a non-macro"""
-        menuTxt = self.form.LineEditMenuText.text()
-        macroMenuTxt = ""
-        if not menuTxt:
-            raise Exception("No menu text")
-        macroCmdName = FreeCADGui.Command.findCustomCommand(self.macroName)
-        macroCmd = FreeCADGui.Command.get(macroCmdName) if macroCmdName else ""
-        macroInfo = macroCmd.getInfo() if macroCmd else ""
-        macroMenuTxt = macroInfo["menuText"] if macroInfo else os.path.splitext(self.macroName)[0]
-        if macroMenuTxt and macroMenuTxt == menuTxt:
-            return True
-        nonCmdName = self.nonMacroName
-        nonCmd = FreeCADGui.Command.get(nonCmdName) if nonCmdName else ""
-        nonInfo = nonCmd.getInfo() if nonCmd else ""
-        nonMenuTxt = nonInfo["menuText"]
-        if nonMenuTxt and nonMenuTxt == menuTxt:
-            return False
-        print(f"menuTxt = {menuTxt}, macroMenuTxt = {macroMenuTxt}, nonMenuTxt = {nonMenuTxt}")
-        raise Exception("Neither macro nor non-macro in Menu Text")
-
     def addNonMacroButtonClicked(self):
         """add a non macro to the toolbar"""
-        if self.isMacro():
-            self.showMsg("Macro currently selected.","error")
-            return
         self.updateVariables()
         if not self.menuText:
             self.showMsg("Menu text field cannot be empty.","error")
@@ -3469,9 +3510,6 @@ class CustomToolbarEditor(QtGui.QWidget):
 
 
     def addMacroToToolbarButtonClicked(self):
-        if not self.isMacro():
-            self.showMsg("Non macro currently selected.","error")
-            return
         self.updateVariables()
         if not self.menuText:
             self.showMsg("Menu text field cannot be empty.","error")
@@ -6128,6 +6166,13 @@ Must be toolbar / workbench combination selected in the dialog.</string>
             </property>
             <property name="text">
              <string>Make icon</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="extractXPMButton">
+            <property name="text">
+             <string>Extract XPM</string>
             </property>
            </widget>
           </item>
