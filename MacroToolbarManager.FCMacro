@@ -4,7 +4,7 @@
 #
 #Goal is to make it simpler and easier to manage custom
 #macros on custom toolbars
-__version__ = "0.2023.10.22b"
+__version__ = "0.2023.10.23"
 
 LOAD_STRING = True #load UI from a string defined in this file if True,
                    #else from a separate ui file during development
@@ -3137,7 +3137,7 @@ class CustomToolbarEditor(QtGui.QWidget):
         self.form.LineEditToolTip.setEnabled(not bEnable)
         self.form.LineEditStatusText.setEnabled(not bEnable)
         self.form.LineEditWhatsThis.setEnabled(not bEnable)
-        self.form.LineEditShortcut.setEnabled(not bEnable)
+        #self.form.LineEditShortcut.setEnabled(not bEnable)
         self.form.LineEditPixmap.setEnabled(not bEnable)
         self.form.systemIconButton.setEnabled(not bEnable)
         self.form.selectIconFileButton.setEnabled(not bEnable)
@@ -3262,14 +3262,15 @@ class CustomToolbarEditor(QtGui.QWidget):
 
         buttons = [child for child in self.form.findChildren(QtGui.QPushButton)\
                          if child.objectName() != "closeButton"\
-                         and child.objectName() != "menuButton"\
-                         and "select" not in child.objectName()]
+                         and child.objectName() != "menuButton" \
+                         and "fromMacro" not in child.objectName()]
         maxWidthButton = self.form.removeMacroFromToolbarButton
         for button in buttons:
             button.setFixedWidth(maxWidthButton.sizeHint().width())
 
         buttons = [child for child in self.form.findChildren(QtGui.QPushButton)\
-                    if "select" in child.objectName()]
+                    if "select" in child.objectName() and \
+                    not "selectIconFileButton" in child.objectName()]
         for button in buttons:
             button.setFixedWidth(40)
 
@@ -3490,9 +3491,6 @@ class CustomToolbarEditor(QtGui.QWidget):
     def addNonMacroButtonClicked(self):
         """add a non macro to the toolbar"""
         self.updateVariables()
-        if not self.menuText:
-            self.showMsg("Menu text field cannot be empty.","error")
-            return
         if not self.tbName:
             self.showMsg("No custom toolbar.  Create one first.","error")
             return
@@ -3502,8 +3500,16 @@ class CustomToolbarEditor(QtGui.QWidget):
             return
         exists = tm.isInstalled(self.nonMacroName)
         if exists:
-            tm.uninstallMacroFromToolbar(self.nonMacroName)
+            tm.uninstallNonMacroFromToolbar(self.nonMacroName)
             self.showMsg(f"Removing and re-installing {self.nonMacroName} to {self.tbName} for workbench: {self.wbName}","warning")
+
+        #for non-macro types all we can really edit is the shortcut because we are simply
+        #re-using an existing action
+
+        cmd = FreeCADGui.Command.get(self.nonMacroName)
+        if cmd:
+            cmd.setShortcut(self.shortcut if self.shortcut else "")
+
 
         nonMacroObject = Macro(self.nonMacroName, \
                                 self.menuText, \
@@ -6140,10 +6146,10 @@ Must be toolbar / workbench combination selected in the dialog.</string>
           <item>
            <widget class="QPushButton" name="systemIconButton">
             <property name="toolTip">
-             <string>This button has a right-click context menu</string>
+             <string>Browse system icons.  This button has a right-click context menu</string>
             </property>
             <property name="text">
-             <string>System icon</string>
+             <string>System</string>
             </property>
            </widget>
           </item>
@@ -6156,7 +6162,7 @@ Must be toolbar / workbench combination selected in the dialog.</string>
              <enum>Qt::LeftToRight</enum>
             </property>
             <property name="text">
-             <string>Browse for icon</string>
+             <string>Browse</string>
             </property>
            </widget>
           </item>
@@ -6173,7 +6179,7 @@ Must be toolbar / workbench combination selected in the dialog.</string>
           <item>
            <widget class="QPushButton" name="makeIconButton">
             <property name="toolTip">
-             <string>Make a simple single-colored text-based XPM icon.</string>
+             <string>Make your own icon with the icon maker tool.</string>
             </property>
             <property name="text">
              <string>Make icon</string>
@@ -6182,6 +6188,10 @@ Must be toolbar / workbench combination selected in the dialog.</string>
           </item>
           <item>
            <widget class="QPushButton" name="extractXPMButton">
+            <property name="toolTip">
+             <string>Extract XPM from the current icon and put it into the Extraction text edit below,
+ where it can then be saved using the Save XPM button.</string>
+            </property>
             <property name="text">
              <string>Extract XPM</string>
             </property>
@@ -6248,7 +6258,7 @@ Must be toolbar / workbench combination selected in the dialog.</string>
              <string>If the text is a hyperlink to an online image file, you can use this button to download and store it to your local hard drive.</string>
             </property>
             <property name="text">
-             <string>Download link</string>
+             <string>Download</string>
             </property>
            </widget>
           </item>
