@@ -41,8 +41,28 @@ FreeCAD allows you to specify additional icon folders to search for icons in.  T
 #### Load workbenches (action)
 This will load all installed workbenches, one after another.  It will take a while, so be patient.  Why would you do this?  When adding a new shortcut keyboard accelerator, the macro checks for conflicts.  But only the loaded workbenches can be checked, so if you have a conflicting shortcut in use in a workbench that hasn't been loaded yet in this session of FreeCAD, then the conflict checker will not find the conflit.  So, use this option before setting up shortcut accelerator keys to be confident you have chosen one without conflicts.
 
+#### Autoload this workbench (action)
+This will modify your preferences to add the current workbench selected in the Workbench combo box (not the current active workbench in FreeCAD!) to the automatic load list in FreeCAD preferences.  There is no option to undo this in the macro.  To undo you would go to Edit menu -> Preferences -> Workbenches -> and uncheck the checkbox for auto loading the workbench.  This is for the cases where you had a non-macro action from a workbench and you want it loaded a start time so the toolbar icon will be visible.  (It is hit or miss whether this will actually work.  The workbench will be automatically loaded, but the toolbar might have already been initialized by that point.  There is another option below -- creating a macro to run that non-macro action and putting that macro on the toolbar.)
+
 #### Remove orphans (action)
 Orphans are macro toolbar items whose macro actions have been removed.  They don't show up in the toolbar, but they're still in the parameters database.  This option purges the database of these derelict macro items.  It doesn't delete any files.
+
+#### Create macro for this non-macro action (action)
+This creates a macro to run the current non-macro action selected in the Non-macros combo box.  The macro will be placed in your macros folder and will be the same name as the non-macro action.  For example, suppose you want a macro to run the Sketcher_ValidateSketch command.  Select that command in the Non-Macros combo box, and select the Create macro for this non-macro action menu item.  Now you have a macro named Sketcher_ValidateSketch.FCMacro in your macros folder and it is now selected in the Macro names combo box.  (You'll get a dialog asking you if this is a core function or if it requires a specific workbench to run.  In this case, since it's a sketcher function you would select Sketcher workbench in this dialog.)
+
+Here is the example macro that gets created:
+
+<pre>
+currentWB = Gui.activeWorkbench().name()
+Gui.activateWorkbench('SketcherWorkbench')
+Gui.activateWorkbench(currentWB)
+cmd = Gui.Command.get('Sketcher_ValidateSketch')
+cmd.run(0)
+</pre>
+
+Important: this function checks if there is an existing file by the same name and will not overwrite that existing file.  It will also not offer you to give it a different name.  You'll need to rename or delete that other file and do this operation again if there is a naming conflict.
+
+Before you add this macro to the toolbar you should create a new icon for it and put that icon your icons folder.  That way, the icon is available even if the workbench hasn't yet been loaded.  The process for doing this is quite simple: Click the Extract XPM button, then click the Save XPM button to save it as an XPM file.  After that click the + Macro button to add the macro to the toolbar.  The Save XPM button will by default open in your first custom icon folder if you have created one, or else it will open your macros folder.  You can put the icons in the macros folder if you like, but it is probably better to put them all into their own folder for better organization and less clutter in the macros folder.  (See above: System icons - manage icon folders for more information on this.)
 
 #### Delete macro (action)
 Deletes the macro file from your macros folder.  There is a sanity check, but it's not reversable, so be careful.
