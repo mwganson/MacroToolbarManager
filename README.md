@@ -154,6 +154,7 @@ There is a label at the bottom of the dialog below the Icon information field bu
 
 
 ## Changelog
+### v2023.10.27 -- update the ui to use a gridlayout instead of all the different horizontal and vertical layouts, Make icon button always active
 ### v2023.10.22b -- don't ask for workbench when creating macro for non-macro action if command begins with "Std_", resize some buttons, minor bug fix
 ### v2023.10.22 -- add feature to create macro for non-macro action to run that action, add ability to extract XPM from current icon,
 ### v2023.10.21 -- add support for non-macro actions, add ability to autoload the current workbench, revised ui, move close button to menu as Quit action
