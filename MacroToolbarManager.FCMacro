@@ -4,7 +4,7 @@
 #
 #Goal is to make it simpler and easier to manage custom
 #macros on custom toolbars
-__version__ = "0.2023.10.23"
+__version__ = "0.2023.10.27"
 
 LOAD_STRING = True #load UI from a string defined in this file if True,
                    #else from a separate ui file during development
@@ -3142,7 +3142,7 @@ class CustomToolbarEditor(QtGui.QWidget):
         self.form.systemIconButton.setEnabled(not bEnable)
         self.form.selectIconFileButton.setEnabled(not bEnable)
         self.form.fromMacroButton.setEnabled(not bEnable)
-        self.form.makeIconButton.setEnabled(not bEnable)
+        #self.form.makeIconButton.setEnabled(not bEnable)
 
     def updateLineEditsFromNonMacroCommand(self,cmdName):
         """fills the line edits with the info for the non-macro command"""
@@ -3251,45 +3251,10 @@ class CustomToolbarEditor(QtGui.QWidget):
     def setupUi(self):
         """initial ui setup"""
         self.updateCustomToolbarComboBox()
-
-        qlabels = [child for child in self.form.findChildren(QtGui.QLabel) \
-                                if child.objectName() != "iconLabel" \
-                                and child.objectName() != "extractedLabel"
-                                and child.objectName() != "statusLabel"]
-        maxWidthLabel = max(qlabels, key=lambda label: label.sizeHint().width())
-        for label in qlabels:
-            label.setFixedWidth(maxWidthLabel.sizeHint().width())
-
-        buttons = [child for child in self.form.findChildren(QtGui.QPushButton)\
-                         if child.objectName() != "closeButton"\
-                         and child.objectName() != "menuButton" \
-                         and "fromMacro" not in child.objectName()]
-        maxWidthButton = self.form.removeMacroFromToolbarButton
-        for button in buttons:
-            button.setFixedWidth(maxWidthButton.sizeHint().width())
-
-        buttons = [child for child in self.form.findChildren(QtGui.QPushButton)\
-                    if "select" in child.objectName() and \
-                    not "selectIconFileButton" in child.objectName()]
-        for button in buttons:
-            button.setFixedWidth(40)
-
+        #self.form.gridLayout.addWidget(self.form.LineEditShortcut,11,2)
         self.updateMacroNames()
         self.updateNonMacroNames()
 
-        combos = [child for child in self.form.findChildren(QtGui.QComboBox)]
-                #  if child.objectName() != "ComboBoxWorkbench"]
-        combos.append(self.form.LineEditFilter) #make it same width as combo boxes
-        for combo in combos:
-            combo.setFixedWidth(250)
-
-        #statusLabel is where some messages are displayed at the bottom of
-        #the dialog, just above the Close button.  Keep this to 3 lines only
-        font_metrics = QtGui.QFontMetrics(self.form.statusLabel.font())
-        row_height = font_metrics.height()
-        required_height = 4 * row_height #add 1 to make a little extra space just in case
-        self.form.statusLabel.setFixedHeight(required_height)
-        self.form.statusLabel.setWordWrap(True)
         self.iconize(self.form.selectIconFileButton, "SP_DialogOpenButton")
         self.iconize(self.form.openHyperlinkButton, "SP_DriveNetIcon")
         self.iconize(self.form.saveExtractedButton, "SP_DialogSaveButton")
@@ -5552,8 +5517,8 @@ UI_FILE = '''<?xml version="1.0" encoding="UTF-8"?>
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>645</width>
-    <height>792</height>
+    <width>834</width>
+    <height>718</height>
    </rect>
   </property>
   <property name="sizePolicy">
@@ -5583,766 +5548,477 @@ UI_FILE = '''<?xml version="1.0" encoding="UTF-8"?>
   <property name="sizeGripEnabled">
    <bool>false</bool>
   </property>
-  <widget class="QWidget" name="verticalLayoutWidget">
+  <widget class="QWidget" name="gridLayoutWidget">
    <property name="geometry">
     <rect>
      <x>10</x>
-     <y>10</y>
-     <width>624</width>
-     <height>833</height>
+     <y>0</y>
+     <width>811</width>
+     <height>711</height>
     </rect>
    </property>
-   <layout class="QVBoxLayout" name="mainLayout">
-    <property name="sizeConstraint">
-     <enum>QLayout::SetDefaultConstraint</enum>
-    </property>
-    <item>
-     <layout class="QHBoxLayout" name="workbenchLayout">
-      <item>
-       <widget class="QLabel" name="workbenchLabel">
-        <property name="toolTip">
-         <string>Choose a workbench your toolbar will appear in.  If you choose Global it will appear in all of them.</string>
-        </property>
-        <property name="whatsThis">
-         <string/>
-        </property>
-        <property name="text">
-         <string>Workbench:</string>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QComboBox" name="ComboBoxWorkbench">
-        <property name="toolTip">
-         <string>Toolbar will appear in all workbenches</string>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QPushButton" name="activeGlobalButton">
-        <property name="toolTip">
-         <string>Selects active workbench or the Global workbench in the combo box.  Note: custom toolbars added to the Global workbench are available to all workbenches, but toolbars added to specific workbenches are only available when those workbenches are active.</string>
-        </property>
-        <property name="text">
-         <string>Active / Global</string>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <spacer name="horizontalSpacer_4">
-        <property name="orientation">
-         <enum>Qt::Horizontal</enum>
-        </property>
-        <property name="sizeHint" stdset="0">
-         <size>
-          <width>40</width>
-          <height>20</height>
-         </size>
-        </property>
-       </spacer>
-      </item>
-      <item>
-       <widget class="QPushButton" name="menuButton">
-        <property name="sizePolicy">
-         <sizepolicy hsizetype="Preferred" vsizetype="Preferred">
-          <horstretch>0</horstretch>
-          <verstretch>0</verstretch>
-         </sizepolicy>
-        </property>
-        <property name="minimumSize">
-         <size>
-          <width>0</width>
-          <height>0</height>
-         </size>
-        </property>
-        <property name="maximumSize">
-         <size>
-          <width>65</width>
-          <height>28</height>
-         </size>
-        </property>
-        <property name="toolTip">
-         <string>Menu</string>
-        </property>
-        <property name="text">
-         <string/>
-        </property>
-       </widget>
-      </item>
-     </layout>
-    </item>
-    <item>
-     <widget class="QFrame" name="frame_2">
-      <property name="frameShape">
-       <enum>QFrame::HLine</enum>
+   <layout class="QGridLayout" name="gridLayout">
+    <item row="11" column="5">
+     <widget class="QPushButton" name="useAsPixmapButton">
+      <property name="toolTip">
+       <string>If the text is a direct path to a local file or the name of a system icon, such as &quot;application-python&quot; you can use this button to set it up as the Pixmap text.</string>
       </property>
-      <property name="frameShadow">
-       <enum>QFrame::Plain</enum>
-      </property>
-      <property name="lineWidth">
-       <number>1</number>
+      <property name="text">
+       <string>Use as pixmap</string>
       </property>
      </widget>
     </item>
-    <item>
-     <layout class="QHBoxLayout" name="customToolbarLayout">
-      <item>
-       <layout class="QVBoxLayout" name="toolbarWidgetsLayout">
-        <item>
-         <layout class="QHBoxLayout" name="toolbarComboBoxLayout">
-          <property name="topMargin">
-           <number>0</number>
-          </property>
-          <property name="bottomMargin">
-           <number>0</number>
-          </property>
-          <item>
-           <widget class="QLabel" name="customToolbarLabel">
-            <property name="statusTip">
-             <string>You must create a custom toolbar for macros because you cannot edit the standard toolbars.</string>
-            </property>
-            <property name="text">
-             <string>Custom toolbar:</string>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <widget class="QComboBox" name="ComboBoxCustomToolbar">
-            <property name="sizePolicy">
-             <sizepolicy hsizetype="Maximum" vsizetype="Fixed">
-              <horstretch>1</horstretch>
-              <verstretch>0</verstretch>
-             </sizepolicy>
-            </property>
-            <property name="minimumSize">
-             <size>
-              <width>300</width>
-              <height>0</height>
-             </size>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <widget class="QCheckBox" name="activeCheckBox">
-            <property name="toolTip">
-             <string>Toggles visibility of toolbar.  You can disable the toolbar from here without deleting it.</string>
-            </property>
-            <property name="layoutDirection">
-             <enum>Qt::RightToLeft</enum>
-            </property>
-            <property name="text">
-             <string>Active</string>
-            </property>
-           </widget>
-          </item>
-         </layout>
-        </item>
-        <item>
-         <layout class="QHBoxLayout" name="installedInformationLayout">
-          <item>
-           <widget class="QLabel" name="installedLabel">
-            <property name="toolTip">
-             <string>These are the macros currently installed in the current toolbar, if any.  Only macros appear here, not other types of commands that the toolbar might have.</string>
-            </property>
-            <property name="text">
-             <string>Currently installed:</string>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <widget class="QComboBox" name="ComboBoxInstalled"/>
-          </item>
-          <item>
-           <widget class="QPushButton" name="selectInstalledButton">
-            <property name="toolTip">
-             <string>Selects the currently installed macro for editing or removing</string>
-            </property>
-            <property name="text">
-             <string/>
-            </property>
-           </widget>
-          </item>
-         </layout>
-        </item>
-       </layout>
-      </item>
-      <item>
-       <spacer name="horizontalSpacer_3">
-        <property name="orientation">
-         <enum>Qt::Horizontal</enum>
-        </property>
-        <property name="sizeHint" stdset="0">
-         <size>
-          <width>40</width>
-          <height>20</height>
-         </size>
-        </property>
-       </spacer>
-      </item>
-      <item>
-       <layout class="QVBoxLayout" name="customToolbarButtonLayout">
-        <item>
-         <widget class="QPushButton" name="newToolbarButton">
-          <property name="toolTip">
-           <string>Creates a new custom toolbar</string>
-          </property>
-          <property name="text">
-           <string>New</string>
-          </property>
-         </widget>
-        </item>
-        <item>
-         <widget class="QPushButton" name="renameToolbarButton">
-          <property name="toolTip">
-           <string>Rename the current toolbar</string>
-          </property>
-          <property name="text">
-           <string>Rename</string>
-          </property>
-         </widget>
-        </item>
-        <item>
-         <widget class="QPushButton" name="deleteToolbarButton">
-          <property name="toolTip">
-           <string>Delete the current toolbar</string>
-          </property>
-          <property name="text">
-           <string>Delete</string>
-          </property>
-         </widget>
-        </item>
-       </layout>
-      </item>
-     </layout>
-    </item>
-    <item>
-     <widget class="QFrame" name="frame">
-      <property name="frameShape">
-       <enum>QFrame::HLine</enum>
+    <item row="2" column="0">
+     <widget class="QLabel" name="customToolbarLabel">
+      <property name="statusTip">
+       <string>You must create a custom toolbar for macros because you cannot edit the standard toolbars.</string>
       </property>
-      <property name="frameShadow">
-       <enum>QFrame::Plain</enum>
-      </property>
-      <property name="lineWidth">
-       <number>1</number>
-      </property>
-      <property name="midLineWidth">
-       <number>300</number>
+      <property name="text">
+       <string>Custom toolbar:</string>
       </property>
      </widget>
     </item>
-    <item>
-     <layout class="QHBoxLayout" name="macroLayout">
-      <item>
-       <layout class="QVBoxLayout" name="macroNameAndFilterLayout">
-        <item>
-         <layout class="QHBoxLayout" name="filterLayout">
-          <item>
-           <widget class="QLabel" name="filterLabel">
-            <property name="text">
-             <string>Filter:</string>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <widget class="QLineEdit" name="LineEditFilter"/>
-          </item>
-          <item>
-           <spacer name="horizontalSpacer_6">
-            <property name="orientation">
-             <enum>Qt::Horizontal</enum>
-            </property>
-            <property name="sizeHint" stdset="0">
-             <size>
-              <width>40</width>
-              <height>20</height>
-             </size>
-            </property>
-           </spacer>
-          </item>
-         </layout>
-        </item>
-        <item>
-         <widget class="QFrame" name="frame_8">
-          <property name="frameShape">
-           <enum>QFrame::HLine</enum>
-          </property>
-          <property name="frameShadow">
-           <enum>QFrame::Raised</enum>
-          </property>
-         </widget>
-        </item>
-        <item>
-         <layout class="QHBoxLayout" name="nonMacroLayout">
-          <property name="sizeConstraint">
-           <enum>QLayout::SetMinimumSize</enum>
-          </property>
-          <item>
-           <widget class="QLabel" name="nonMacrosLabel">
-            <property name="text">
-             <string>Non-Macros:</string>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <widget class="QComboBox" name="ComboBoxNonMacros"/>
-          </item>
-          <item>
-           <widget class="QPushButton" name="selectNonMacroButton">
-            <property name="text">
-             <string/>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <spacer name="horizontalSpacer_5">
-            <property name="orientation">
-             <enum>Qt::Horizontal</enum>
-            </property>
-            <property name="sizeHint" stdset="0">
-             <size>
-              <width>40</width>
-              <height>20</height>
-             </size>
-            </property>
-           </spacer>
-          </item>
-          <item>
-           <widget class="QPushButton" name="addNonMacroButton">
-            <property name="text">
-             <string>Non-macro</string>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <widget class="QPushButton" name="removeNonMacroButton">
-            <property name="text">
-             <string>Non-macro</string>
-            </property>
-           </widget>
-          </item>
-         </layout>
-        </item>
-        <item>
-         <widget class="QFrame" name="frame_6">
-          <property name="frameShape">
-           <enum>QFrame::HLine</enum>
-          </property>
-          <property name="frameShadow">
-           <enum>QFrame::Sunken</enum>
-          </property>
-         </widget>
-        </item>
-        <item>
-         <layout class="QHBoxLayout" name="macroNameLayout">
-          <item>
-           <widget class="QLabel" name="macroNameLabel">
-            <property name="toolTip">
-             <string>These are all the macro files in the user's macro directory.</string>
-            </property>
-            <property name="text">
-             <string>Macro name:</string>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <widget class="QComboBox" name="ComboBoxMacroName"/>
-          </item>
-          <item>
-           <widget class="QPushButton" name="selectMacroButton">
-            <property name="text">
-             <string/>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <spacer name="horizontalSpacer_7">
-            <property name="orientation">
-             <enum>Qt::Horizontal</enum>
-            </property>
-            <property name="sizeHint" stdset="0">
-             <size>
-              <width>40</width>
-              <height>20</height>
-             </size>
-            </property>
-           </spacer>
-          </item>
-          <item>
-           <widget class="QPushButton" name="addMacroToToolbarButton">
-            <property name="toolTip">
-             <string>Adds or updates macro to toolbar if there is an active toolbar.
-Requirements: Menu text must not be empty
-Must be toolbar / workbench combination selected in the dialog.</string>
-            </property>
-            <property name="text">
-             <string>Macro</string>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <widget class="QPushButton" name="removeMacroFromToolbarButton">
-            <property name="toolTip">
-             <string>Remove the macro from the toolbar.  Does not delete the macro action.</string>
-            </property>
-            <property name="text">
-             <string>Macro</string>
-            </property>
-           </widget>
-          </item>
-         </layout>
-        </item>
-        <item>
-         <widget class="QFrame" name="frame_7">
-          <property name="frameShape">
-           <enum>QFrame::HLine</enum>
-          </property>
-          <property name="frameShadow">
-           <enum>QFrame::Sunken</enum>
-          </property>
-         </widget>
-        </item>
-       </layout>
-      </item>
-     </layout>
-    </item>
-    <item>
-     <layout class="QHBoxLayout" name="menuTextLayout">
-      <item>
-       <widget class="QLabel" name="menuTextLabel">
-        <property name="toolTip">
-         <string>This text (required) will be shown on the toolbar in lieu of a toolbar icon if one isn't selected.</string>
-        </property>
-        <property name="text">
-         <string>Menu text:</string>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QLineEdit" name="LineEditMenuText"/>
-      </item>
-     </layout>
-    </item>
-    <item>
-     <layout class="QHBoxLayout" name="tooltipLayout">
-      <item>
-       <widget class="QLabel" name="tooltipLabel">
-        <property name="statusTip">
-         <string>This text you're reading now.  It appears when the mouse pointer hovers over the toolbar icon or menu text.</string>
-        </property>
-        <property name="text">
-         <string>Tool tip:</string>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QLineEdit" name="LineEditToolTip"/>
-      </item>
-     </layout>
-    </item>
-    <item>
-     <layout class="QHBoxLayout" name="statusTextLayout">
-      <item>
-       <widget class="QLabel" name="statusTextLabel">
-        <property name="toolTip">
-         <string>Text will appear in the status bar when the mouse pointer is over the toolbar icon or menu text</string>
-        </property>
-        <property name="whatsThis">
-         <string/>
-        </property>
-        <property name="text">
-         <string>Status text:</string>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QLineEdit" name="LineEditStatusText"/>
-      </item>
-     </layout>
-    </item>
-    <item>
-     <layout class="QHBoxLayout" name="whatsThisLayout">
-      <item>
-       <widget class="QLabel" name="whatsThisLabel">
-        <property name="toolTip">
-         <string>Text displayed when the user clicks the ? help button and then clicks the toolbar icon or menu text</string>
-        </property>
-        <property name="whatsThis">
-         <string/>
-        </property>
-        <property name="text">
-         <string>What's this:</string>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QLineEdit" name="LineEditWhatsThis"/>
-      </item>
-     </layout>
-    </item>
-    <item>
-     <layout class="QHBoxLayout" name="shortcutLayout">
-      <item>
-       <widget class="QLabel" name="shortcutLabel">
-        <property name="toolTip">
-         <string>keyboard accelerator, e.g. Ctrl + D</string>
-        </property>
-        <property name="text">
-         <string>Shortcut:</string>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="Gui::AccelLineEdit" name="LineEditShortcut" native="true">
-        <property name="minimumSize">
-         <size>
-          <width>0</width>
-          <height>0</height>
-         </size>
-        </property>
-        <property name="toolTip">
-         <string>Gui::AccelLineEdit widget, select and press your desired shortcut key modifier key combination</string>
-        </property>
-       </widget>
-      </item>
-     </layout>
-    </item>
-    <item>
-     <widget class="QFrame" name="frame_3">
-      <property name="frameShape">
-       <enum>QFrame::HLine</enum>
+    <item row="9" column="0">
+     <widget class="QLabel" name="statusTextLabel">
+      <property name="toolTip">
+       <string>Text will appear in the status bar when the mouse pointer is over the toolbar icon or menu text</string>
       </property>
-      <property name="frameShadow">
-       <enum>QFrame::Plain</enum>
+      <property name="whatsThis">
+       <string/>
       </property>
-      <property name="lineWidth">
-       <number>1</number>
+      <property name="text">
+       <string>Status text:</string>
       </property>
      </widget>
     </item>
-    <item>
-     <layout class="QHBoxLayout" name="pixmapLayout">
-      <item>
-       <layout class="QVBoxLayout" name="pixmapTextAndButtonsLayout">
-        <item>
-         <layout class="QHBoxLayout" name="pixmapTextLayout">
-          <item>
-           <widget class="QLabel" name="pixmapLabel">
-            <property name="toolTip">
-             <string>text for displaying the icon.  It is in some cases a name of a system icon, and in other cases the path to an icon file.</string>
-            </property>
-            <property name="text">
-             <string>Pixmap:</string>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <widget class="QLineEdit" name="LineEditPixmap"/>
-          </item>
-         </layout>
-        </item>
-        <item>
-         <layout class="QHBoxLayout" name="pixmapButtonsLayout">
-          <item>
-           <widget class="QPushButton" name="systemIconButton">
-            <property name="toolTip">
-             <string>Browse system icons.  This button has a right-click context menu</string>
-            </property>
-            <property name="text">
-             <string>System</string>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <widget class="QPushButton" name="selectIconFileButton">
-            <property name="toolTip">
-             <string>Browse local file system for an icon file.  Many image formats are supported.  SVG is scalable, and so is recommended.</string>
-            </property>
-            <property name="layoutDirection">
-             <enum>Qt::LeftToRight</enum>
-            </property>
-            <property name="text">
-             <string>Browse</string>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <widget class="QPushButton" name="fromMacroButton">
-            <property name="toolTip">
-             <string>Attempt to extract icon information embedded in macro file as __icon__ or __xpm__ variable.</string>
-            </property>
-            <property name="text">
-             <string>From macro</string>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <widget class="QPushButton" name="makeIconButton">
-            <property name="toolTip">
-             <string>Make your own icon with the icon maker tool.</string>
-            </property>
-            <property name="text">
-             <string>Make icon</string>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <widget class="QPushButton" name="extractXPMButton">
-            <property name="toolTip">
-             <string>Extract XPM from the current icon and put it into the Extraction text edit below,
- where it can then be saved using the Save XPM button.</string>
-            </property>
-            <property name="text">
-             <string>Extract XPM</string>
-            </property>
-           </widget>
-          </item>
-         </layout>
-        </item>
-       </layout>
-      </item>
-      <item>
-       <layout class="QVBoxLayout" name="iconLayout">
-        <item>
-         <widget class="QLabel" name="iconLabel">
-          <property name="minimumSize">
-           <size>
-            <width>64</width>
-            <height>64</height>
-           </size>
-          </property>
-          <property name="toolTip">
-           <string>Icon in Pixmap will be displayed here, or if null you get this macro's icon.</string>
-          </property>
-          <property name="text">
-           <string>icon</string>
-          </property>
-         </widget>
-        </item>
-       </layout>
-      </item>
-     </layout>
-    </item>
-    <item>
-     <widget class="QFrame" name="frame_9">
-      <property name="frameShape">
-       <enum>QFrame::HLine</enum>
+    <item row="6" column="0">
+     <widget class="QLabel" name="macroNameLabel">
+      <property name="toolTip">
+       <string>These are all the macro files in the user's macro directory.</string>
       </property>
-      <property name="frameShadow">
-       <enum>QFrame::Raised</enum>
+      <property name="text">
+       <string>Macro name:</string>
       </property>
      </widget>
     </item>
-    <item>
-     <layout class="QVBoxLayout" name="extractionLayout">
-      <item>
-       <layout class="QVBoxLayout" name="extractionEditLayout">
-        <item>
-         <widget class="QPlainTextEdit" name="PlainTextEditExtracted">
-          <property name="maximumSize">
-           <size>
-            <width>16777215</width>
-            <height>100</height>
-           </size>
-          </property>
-          <property name="toolTip">
-           <string>If this is a direct hyperlink to a file, you can download and save it with this button, which also sets it up as the Pixmap.</string>
-          </property>
-         </widget>
-        </item>
-        <item>
-         <layout class="QHBoxLayout" name="extractionButtonsLayout">
-          <item>
-           <widget class="QPushButton" name="openHyperlinkButton">
-            <property name="toolTip">
-             <string>If the text is a hyperlink to an online image file, you can use this button to download and store it to your local hard drive.</string>
-            </property>
-            <property name="text">
-             <string>Download</string>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <widget class="QPushButton" name="useAsPixmapButton">
-            <property name="toolTip">
-             <string>If the text is a direct path to a local file or the name of a system icon, such as &quot;application-python&quot; you can use this button to set it up as the Pixmap text.</string>
-            </property>
-            <property name="text">
-             <string>Use as pixmap</string>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <widget class="QPushButton" name="saveExtractedButton">
-            <property name="toolTip">
-             <string>If the text is an XPM definition, then you can use this button to save it as a local XPM file and set it up as the Pixmap text.</string>
-            </property>
-            <property name="text">
-             <string>Save XPM</string>
-            </property>
-           </widget>
-          </item>
-         </layout>
-        </item>
-       </layout>
-      </item>
-     </layout>
-    </item>
-    <item>
-     <widget class="QFrame" name="frame_4">
-      <property name="frameShape">
-       <enum>QFrame::HLine</enum>
+    <item row="11" column="4">
+     <widget class="QPushButton" name="makeIconButton">
+      <property name="toolTip">
+       <string>Make your own icon with the icon maker tool.</string>
       </property>
-      <property name="frameShadow">
-       <enum>QFrame::Plain</enum>
+      <property name="text">
+       <string>Make icon</string>
       </property>
      </widget>
     </item>
-    <item>
-     <layout class="QHBoxLayout" name="statusLayout">
-      <property name="spacing">
-       <number>7</number>
-      </property>
-      <property name="sizeConstraint">
-       <enum>QLayout::SetMinimumSize</enum>
-      </property>
-      <property name="topMargin">
-       <number>0</number>
-      </property>
-      <item>
-       <widget class="QLabel" name="statusLabel">
-        <property name="toolTip">
-         <string>Various assorted status messages go here.  Black is normal message, Orange is warning, and Red indicates some kind of error.  Right-click context menu available for clearing messages.</string>
-        </property>
-        <property name="text">
-         <string>Messages go here.</string>
-        </property>
-       </widget>
-      </item>
-     </layout>
+    <item row="12" column="2">
+     <widget class="QLineEdit" name="LineEditPixmap"/>
     </item>
-    <item>
-     <widget class="QFrame" name="frame_5">
-      <property name="frameShape">
-       <enum>QFrame::HLine</enum>
-      </property>
-      <property name="frameShadow">
-       <enum>QFrame::Plain</enum>
-      </property>
-     </widget>
+    <item row="5" column="2">
+     <widget class="QComboBox" name="ComboBoxNonMacros"/>
     </item>
-    <item>
-     <spacer name="verticalSpacer">
-      <property name="orientation">
-       <enum>Qt::Vertical</enum>
+    <item row="0" column="7">
+     <widget class="QPushButton" name="menuButton">
+      <property name="sizePolicy">
+       <sizepolicy hsizetype="Preferred" vsizetype="Preferred">
+        <horstretch>0</horstretch>
+        <verstretch>0</verstretch>
+       </sizepolicy>
       </property>
-      <property name="sizeHint" stdset="0">
+      <property name="minimumSize">
        <size>
-        <width>20</width>
-        <height>40</height>
+        <width>0</width>
+        <height>0</height>
        </size>
       </property>
-     </spacer>
+      <property name="maximumSize">
+       <size>
+        <width>65</width>
+        <height>28</height>
+       </size>
+      </property>
+      <property name="toolTip">
+       <string>Menu</string>
+      </property>
+      <property name="layoutDirection">
+       <enum>Qt::RightToLeft</enum>
+      </property>
+      <property name="text">
+       <string/>
+      </property>
+     </widget>
+    </item>
+    <item row="3" column="4">
+     <widget class="QPushButton" name="selectInstalledButton">
+      <property name="toolTip">
+       <string>Selects the currently installed macro for editing or removing</string>
+      </property>
+      <property name="text">
+       <string/>
+      </property>
+     </widget>
+    </item>
+    <item row="4" column="7">
+     <widget class="QPushButton" name="deleteToolbarButton">
+      <property name="toolTip">
+       <string>Delete the current toolbar</string>
+      </property>
+      <property name="text">
+       <string>Delete</string>
+      </property>
+     </widget>
+    </item>
+    <item row="0" column="2">
+     <widget class="QComboBox" name="ComboBoxWorkbench">
+      <property name="toolTip">
+       <string>Toolbar will appear in all workbenches</string>
+      </property>
+     </widget>
+    </item>
+    <item row="12" column="5">
+     <widget class="QPushButton" name="selectIconFileButton">
+      <property name="toolTip">
+       <string>Browse local file system for an icon file.  Many image formats are supported.  SVG is scalable, and so is recommended.</string>
+      </property>
+      <property name="layoutDirection">
+       <enum>Qt::LeftToRight</enum>
+      </property>
+      <property name="text">
+       <string>Browse</string>
+      </property>
+     </widget>
+    </item>
+    <item row="10" column="7">
+     <widget class="QPushButton" name="saveExtractedButton">
+      <property name="toolTip">
+       <string>If the text is an XPM definition, then you can use this button to save it as a local XPM file and set it up as the Pixmap text.</string>
+      </property>
+      <property name="text">
+       <string>Save XPM</string>
+      </property>
+     </widget>
+    </item>
+    <item row="10" column="2">
+     <widget class="QLineEdit" name="LineEditWhatsThis"/>
+    </item>
+    <item row="2" column="2">
+     <widget class="QComboBox" name="ComboBoxCustomToolbar">
+      <property name="sizePolicy">
+       <sizepolicy hsizetype="Preferred" vsizetype="Preferred">
+        <horstretch>1</horstretch>
+        <verstretch>0</verstretch>
+       </sizepolicy>
+      </property>
+      <property name="minimumSize">
+       <size>
+        <width>0</width>
+        <height>0</height>
+       </size>
+      </property>
+     </widget>
+    </item>
+    <item row="12" column="4">
+     <widget class="QLabel" name="iconLabel">
+      <property name="minimumSize">
+       <size>
+        <width>64</width>
+        <height>64</height>
+       </size>
+      </property>
+      <property name="toolTip">
+       <string>Icon in Pixmap will be displayed here, or if null you get this macro's icon.</string>
+      </property>
+      <property name="frameShape">
+       <enum>QFrame::Box</enum>
+      </property>
+      <property name="text">
+       <string>icon</string>
+      </property>
+      <property name="alignment">
+       <set>Qt::AlignCenter</set>
+      </property>
+     </widget>
+    </item>
+    <item row="11" column="0">
+     <widget class="QLabel" name="shortcutLabel">
+      <property name="toolTip">
+       <string>keyboard accelerator, e.g. Ctrl + D</string>
+      </property>
+      <property name="text">
+       <string>Shortcut:</string>
+      </property>
+     </widget>
+    </item>
+    <item row="9" column="2">
+     <widget class="QLineEdit" name="LineEditStatusText"/>
+    </item>
+    <item row="3" column="2">
+     <widget class="QComboBox" name="ComboBoxInstalled"/>
+    </item>
+    <item row="7" column="0">
+     <widget class="QLabel" name="menuTextLabel">
+      <property name="toolTip">
+       <string>This text (required) will be shown on the toolbar in lieu of a toolbar icon if one isn't selected.</string>
+      </property>
+      <property name="text">
+       <string>Menu text:</string>
+      </property>
+     </widget>
+    </item>
+    <item row="4" column="2">
+     <widget class="QLineEdit" name="LineEditFilter"/>
+    </item>
+    <item row="5" column="0">
+     <widget class="QLabel" name="nonMacrosLabel">
+      <property name="text">
+       <string>Non-Macros:</string>
+      </property>
+     </widget>
+    </item>
+    <item row="6" column="7">
+     <widget class="QPushButton" name="removeMacroFromToolbarButton">
+      <property name="toolTip">
+       <string>Remove the macro from the toolbar.  Does not delete the macro action.</string>
+      </property>
+      <property name="text">
+       <string>Macro</string>
+      </property>
+     </widget>
+    </item>
+    <item row="11" column="7">
+     <widget class="QPushButton" name="openHyperlinkButton">
+      <property name="toolTip">
+       <string>If the text is a hyperlink to an online image file, you can use this button to download and store it to your local hard drive.</string>
+      </property>
+      <property name="text">
+       <string>Download</string>
+      </property>
+     </widget>
+    </item>
+    <item row="0" column="5">
+     <widget class="QPushButton" name="activeGlobalButton">
+      <property name="toolTip">
+       <string>Selects active workbench or the Global workbench in the combo box.  Note: custom toolbars added to the Global workbench are available to all workbenches, but toolbars added to specific workbenches are only available when those workbenches are active.</string>
+      </property>
+      <property name="text">
+       <string>Active / Global</string>
+      </property>
+     </widget>
+    </item>
+    <item row="3" column="7">
+     <widget class="QPushButton" name="renameToolbarButton">
+      <property name="toolTip">
+       <string>Rename the current toolbar</string>
+      </property>
+      <property name="text">
+       <string>Rename</string>
+      </property>
+     </widget>
+    </item>
+    <item row="6" column="5">
+     <widget class="QPushButton" name="addMacroToToolbarButton">
+      <property name="toolTip">
+       <string>Adds or updates macro to toolbar if there is an active toolbar.
+Requirements: Menu text must not be empty
+Must be toolbar / workbench combination selected in the dialog.</string>
+      </property>
+      <property name="text">
+       <string>Macro</string>
+      </property>
+     </widget>
+    </item>
+    <item row="3" column="0">
+     <widget class="QLabel" name="installedLabel">
+      <property name="toolTip">
+       <string>These are the macros currently installed in the current toolbar, if any.  Only macros appear here, not other types of commands that the toolbar might have.</string>
+      </property>
+      <property name="text">
+       <string>Currently installed:</string>
+      </property>
+     </widget>
+    </item>
+    <item row="0" column="0">
+     <widget class="QLabel" name="workbenchLabel">
+      <property name="toolTip">
+       <string>Choose a workbench your toolbar will appear in.  If you choose Global it will appear in all of them.</string>
+      </property>
+      <property name="whatsThis">
+       <string/>
+      </property>
+      <property name="text">
+       <string>Workbench:</string>
+      </property>
+     </widget>
+    </item>
+    <item row="8" column="2">
+     <widget class="QLineEdit" name="LineEditToolTip"/>
+    </item>
+    <item row="2" column="7">
+     <widget class="QPushButton" name="newToolbarButton">
+      <property name="toolTip">
+       <string>Creates a new custom toolbar</string>
+      </property>
+      <property name="text">
+       <string>New</string>
+      </property>
+     </widget>
+    </item>
+    <item row="5" column="7">
+     <widget class="QPushButton" name="removeNonMacroButton">
+      <property name="text">
+       <string>Non-macro</string>
+      </property>
+     </widget>
+    </item>
+    <item row="10" column="0">
+     <widget class="QLabel" name="whatsThisLabel">
+      <property name="toolTip">
+       <string>Text displayed when the user clicks the ? help button and then clicks the toolbar icon or menu text</string>
+      </property>
+      <property name="whatsThis">
+       <string/>
+      </property>
+      <property name="text">
+       <string>What's this:</string>
+      </property>
+     </widget>
+    </item>
+    <item row="8" column="0">
+     <widget class="QLabel" name="tooltipLabel">
+      <property name="statusTip">
+       <string>This text you're reading now.  It appears when the mouse pointer hovers over the toolbar icon or menu text.</string>
+      </property>
+      <property name="text">
+       <string>Tool tip:</string>
+      </property>
+     </widget>
+    </item>
+    <item row="6" column="4">
+     <widget class="QPushButton" name="selectMacroButton">
+      <property name="text">
+       <string/>
+      </property>
+     </widget>
+    </item>
+    <item row="10" column="4">
+     <widget class="QPushButton" name="extractXPMButton">
+      <property name="toolTip">
+       <string>Extract XPM from the current icon and put it into the Extraction text edit below,
+ where it can then be saved using the Save XPM button.</string>
+      </property>
+      <property name="text">
+       <string>Extract XPM</string>
+      </property>
+     </widget>
+    </item>
+    <item row="7" column="2">
+     <widget class="QLineEdit" name="LineEditMenuText"/>
+    </item>
+    <item row="4" column="0">
+     <widget class="QLabel" name="filterLabel">
+      <property name="text">
+       <string>Filter:</string>
+      </property>
+     </widget>
+    </item>
+    <item row="5" column="5">
+     <widget class="QPushButton" name="addNonMacroButton">
+      <property name="text">
+       <string>Non-macro</string>
+      </property>
+     </widget>
+    </item>
+    <item row="12" column="0">
+     <widget class="QLabel" name="pixmapLabel">
+      <property name="toolTip">
+       <string>text for displaying the icon.  It is in some cases a name of a system icon, and in other cases the path to an icon file.</string>
+      </property>
+      <property name="text">
+       <string>Pixmap:</string>
+      </property>
+     </widget>
+    </item>
+    <item row="10" column="5">
+     <widget class="QPushButton" name="systemIconButton">
+      <property name="toolTip">
+       <string>Browse system icons.  This button has a right-click context menu</string>
+      </property>
+      <property name="text">
+       <string>System</string>
+      </property>
+     </widget>
+    </item>
+    <item row="6" column="2">
+     <widget class="QComboBox" name="ComboBoxMacroName"/>
+    </item>
+    <item row="5" column="4">
+     <widget class="QPushButton" name="selectNonMacroButton">
+      <property name="text">
+       <string/>
+      </property>
+     </widget>
+    </item>
+    <item row="0" column="4">
+     <widget class="QCheckBox" name="activeCheckBox">
+      <property name="toolTip">
+       <string>Toggles visibility of toolbar.  You can disable the toolbar from here without deleting it.</string>
+      </property>
+      <property name="layoutDirection">
+       <enum>Qt::RightToLeft</enum>
+      </property>
+      <property name="text">
+       <string>Active</string>
+      </property>
+     </widget>
+    </item>
+    <item row="12" column="7">
+     <widget class="QPushButton" name="fromMacroButton">
+      <property name="toolTip">
+       <string>Attempt to extract icon information embedded in macro file as __icon__ or __xpm__ variable.</string>
+      </property>
+      <property name="text">
+       <string>From macro</string>
+      </property>
+     </widget>
+    </item>
+    <item row="11" column="2">
+     <widget class="Gui::AccelLineEdit" name="LineEditShortcut" native="true">
+      <property name="minimumSize">
+       <size>
+        <width>0</width>
+        <height>0</height>
+       </size>
+      </property>
+      <property name="toolTip">
+       <string>Gui::AccelLineEdit widget, select and press your desired shortcut key modifier key combination</string>
+      </property>
+     </widget>
+    </item>
+    <item row="22" column="0" colspan="8">
+     <widget class="QPlainTextEdit" name="PlainTextEditExtracted">
+      <property name="maximumSize">
+       <size>
+        <width>16777215</width>
+        <height>100</height>
+       </size>
+      </property>
+      <property name="toolTip">
+       <string>If this is a direct hyperlink to a file, you can download and save it with this button, which also sets it up as the Pixmap.</string>
+      </property>
+     </widget>
+    </item>
+    <item row="23" column="0" colspan="8">
+     <widget class="QLabel" name="statusLabel">
+      <property name="toolTip">
+       <string>Various assorted status messages go here.  Black is normal message, Orange is warning, and Red indicates some kind of error.  Right-click context menu available for clearing messages.</string>
+      </property>
+      <property name="frameShape">
+       <enum>QFrame::Box</enum>
+      </property>
+      <property name="text">
+       <string>Messages go here.</string>
+      </property>
+     </widget>
     </item>
    </layout>
   </widget>
