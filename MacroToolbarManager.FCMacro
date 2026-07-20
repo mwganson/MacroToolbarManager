@@ -4,7 +4,7 @@
 #
 #Goal is to make it simpler and easier to manage custom
 #macros on custom toolbars
-__version__ = "0.2026.07.20"
+__version__ = "0.2026.07.20b"
 
 LOAD_STRING = True #load UI from a string defined in this file if True,
                    #else from a separate ui file during development
@@ -155,7 +155,7 @@ class CustomToolbarEditor(QtGui.QWidget):
         parseMod = self.getBool("ParseModFolder",False)
         w = SystemIconSelector(parseModFolder = parseMod, cte=self)
         w.setModal(True)
-        w.exec_()
+        w.exec()
         self.form.LineEditPixmap.setText(w.icon_text)
         w.deleteLater()
 
@@ -202,7 +202,7 @@ class CustomToolbarEditor(QtGui.QWidget):
         msg.setStandardButtons(QtGui.QMessageBox.Yes | QtGui.QMessageBox.No)
         msg.setDefaultButton(QtGui.QMessageBox.No)
 
-        result = msg.exec_()
+        result = msg.exec()
 
         if result == QtGui.QMessageBox.Yes:
             try:
@@ -228,7 +228,7 @@ class CustomToolbarEditor(QtGui.QWidget):
         if event.type() == event.Type.ContextMenu and obj == self.form.systemIconButton:
             # Show the context menu at the cursor position
             systemIconsMenu = self.makeSystemIconsMenu()
-            systemIconsMenu.exec_(event.globalPos())
+            systemIconsMenu.exec(event.globalPos())
             return True
         return super().eventFilter(obj, event)
 
@@ -592,7 +592,7 @@ class CustomToolbarEditor(QtGui.QWidget):
                     "mode rectangle showing you where to place your sketch elements.\n\n" +\
                     "Would you like to create a sketch now? Yes or no?\n")
                     msgBox.setStandardButtons(QtGui.QMessageBox.Yes | QtGui.QMessageBox.No)
-                    result = msgBox.exec_()
+                    result = msgBox.exec()
                     if result == msgBox.Yes:
                         import Sketcher, Part
                         doc = FreeCAD.ActiveDocument if FreeCAD.ActiveDocument else FreeCAD.newDocument()
@@ -1788,7 +1788,7 @@ class CustomToolbarEditor(QtGui.QWidget):
                 parseMod = self.cte.getBool("ParseModFolder",False)
                 w = SystemIconSelector(parseModFolder = parseMod, cte=self.cte, bShowBrowseButton = True, bShowStyleIcons = True)
                 w.setModal(True)
-                w.exec_()
+                w.exec()
                 result = w.icon_text
                 bUseStyle = w.bUseStyle
                 bLoadFromDisk = w.bLoadFromDisk
@@ -1815,7 +1815,7 @@ class CustomToolbarEditor(QtGui.QWidget):
                     dlg = QtGui.QFileDialog(self, "Open image file, or cancel to clear out base icon", default_folder, \
                                     "Image Files (*.png *.jpg *.jpeg *.bmp *.gif *.svg *.webp *.xpm *.XPM);;All Files (*)")
                     dlg.setFileMode(QtGui.QFileDialog.ExistingFile)
-                    if dlg.exec_():
+                    if dlg.exec():
                         filename = dlg.selectedFiles()[0]
                         firstTab.basePixmap = QtGui.QPixmap(filename)
                         firstTab.updateImage()
@@ -2806,7 +2806,7 @@ class CustomToolbarEditor(QtGui.QWidget):
         menu.addAction(quitAction)
 
 
-        menu.exec_(self.form.menuButton.mapToGlobal(QtCore.QPoint()))
+        menu.exec(self.form.menuButton.mapToGlobal(QtCore.QPoint()))
 
     def manageIconFolders(self):
         """Manage the folders we use to find additional icons in when using the System icons button"""
@@ -2935,7 +2935,7 @@ class CustomToolbarEditor(QtGui.QWidget):
                 self.bitmapsGroup.SetString(newname,folder)
 
         dlg = IconFolderManager()
-        dlg.exec_()
+        dlg.exec()
         dlg.deleteLater()
 
 
@@ -2956,7 +2956,7 @@ class CustomToolbarEditor(QtGui.QWidget):
         clearAction = QtGui.QAction("Clear messages", self)
         clearAction.triggered.connect(lambda:self.form.statusLabel.setText(""))
         menu.addAction(clearAction)
-        menu.exec_(self.form.statusLabel.mapToGlobal(event))
+        menu.exec(self.form.statusLabel.mapToGlobal(event))
 
     #the following are convenience properties for accessing widgets' text
 
@@ -3762,7 +3762,7 @@ class CustomToolbarEditor(QtGui.QWidget):
         msg.setStandardButtons(QtGui.QMessageBox.Yes | QtGui.QMessageBox.No)
         msg.setDefaultButton(QtGui.QMessageBox.No)
 
-        result = msg.exec_()
+        result = msg.exec()
 
         if result == QtGui.QMessageBox.Yes:
             tm = self.tm()
