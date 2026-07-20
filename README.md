@@ -154,6 +154,8 @@ There is a label at the bottom of the dialog below the Icon information field bu
 
 
 ## Changelog
+### v2026.07.20b -- replace deprecated exec_() with exec()
+### v2026.07.20 -- update the shortcut line edit to work with newer FreeCAD builds, other minor PySide6 update
 ### v2023.10.27 -- update the ui to use a gridlayout instead of all the different horizontal and vertical layouts, Make icon button always active
 ### v2023.10.22b -- don't ask for workbench when creating macro for non-macro action if command begins with "Std_", resize some buttons, minor bug fix
 ### v2023.10.22 -- add feature to create macro for non-macro action to run that action, add ability to extract XPM from current icon,
