@@ -4,7 +4,7 @@
 #
 #Goal is to make it simpler and easier to manage custom
 #macros on custom toolbars
-__version__ = "0.2023.10.27"
+__version__ = "0.2026.07.20"
 
 LOAD_STRING = True #load UI from a string defined in this file if True,
                    #else from a separate ui file during development
@@ -128,14 +128,15 @@ class CustomToolbarEditor(QtGui.QWidget):
         self.form.systemIconButton.clicked.connect(self.onSystemIconButtonClicked)
         self.form.systemIconButton.installEventFilter(self)
         self.form.LineEditFilter.textChanged.connect(self.startFilterTimer)
-        self.form.LineEditShortcut.textChanged.connect(self.onLineEditShortcutTextChanged)
+        #self.form.LineEditShortcut.textChanged.connect(self.onLineEditShortcutTextChanged)
+        self.form.LineEditShortcut.keySequenceChanged.connect(self.onLineEditShortcutTextChanged)
         self.form.makeIconButton.clicked.connect(self.makeSimpleIcon)
         self.form.extractXPMButton.clicked.connect(self.extractXPMButtonClicked)
 
 
 
     def onLineEditShortcutTextChanged(self):
-        short = self.form.LineEditShortcut.text()
+        short = self.form.LineEditShortcut.keySequence().toString()
         if not short:
             return
         ourCmd = FreeCADGui.Command.findCustomCommand(self.macroName)
@@ -181,7 +182,7 @@ class CustomToolbarEditor(QtGui.QWidget):
         self.tooltip = self.form.LineEditToolTip.text()
         self.statusText = self.form.LineEditStatusText.text()
         self.whatsThis = self.form.LineEditWhatsThis.text()
-        self.shortcut = self.form.LineEditShortcut.text()
+        self.shortcut = self.form.LineEditShortcut.keySequence().toString()
         self.pixmap = self.form.LineEditPixmap.text()
 
     def deleteMacro(self):
@@ -224,7 +225,7 @@ class CustomToolbarEditor(QtGui.QWidget):
         return pg.GetBool(name, default)
 
     def eventFilter(self, obj, event):
-        if event.type() == event.ContextMenu and obj == self.form.systemIconButton:
+        if event.type() == event.Type.ContextMenu and obj == self.form.systemIconButton:
             # Show the context menu at the cursor position
             systemIconsMenu = self.makeSystemIconsMenu()
             systemIconsMenu.exec_(event.globalPos())
@@ -3154,7 +3155,7 @@ class CustomToolbarEditor(QtGui.QWidget):
         self.form.LineEditToolTip.setText(info["toolTip"])
         self.form.LineEditWhatsThis.setText(info["whatsThis"])
         self.form.LineEditStatusText.setText(info["statusTip"])
-        self.form.LineEditShortcut.setText(info["shortcut"])
+        self.form.LineEditShortcut.setKeySequence(QtGui.QKeySequence(info["shortcut"]))
         self.form.LineEditPixmap.setText(info["pixmap"])
 
     def removeOrphans(self):
@@ -3323,7 +3324,7 @@ class CustomToolbarEditor(QtGui.QWidget):
         self.form.LineEditToolTip.setText(self.tooltip)
         self.form.LineEditStatusText.setText(self.statusText)
         self.form.LineEditWhatsThis.setText(self.whatsThis)
-        self.form.LineEditShortcut.setText(self.shortcut)
+        self.form.LineEditShortcut.setKeySequence(QtGui.QKeySequence(self.shortcut))
         self.form.LineEditPixmap.setText(self.pixmap)
 
 
@@ -3596,7 +3597,7 @@ class CustomToolbarEditor(QtGui.QWidget):
             self.form.LineEditToolTip.setText('')
             self.form.LineEditStatusText.setText('')
             self.form.LineEditWhatsThis.setText('')
-            self.form.LineEditShortcut.setText('')
+            self.form.LineEditShortcut.setKeySequence(QtGui.QKeySequence(''))
             self.form.LineEditPixmap.setText('')
         self.handlePixmap()
         self.updateVariables()
