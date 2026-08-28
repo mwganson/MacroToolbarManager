@@ -4,7 +4,7 @@
 #
 #Goal is to make it simpler and easier to manage custom
 #macros on custom toolbars
-__version__ = "0.2026.07.20b"
+__version__ = "0.2026.08.28"
 
 LOAD_STRING = True #load UI from a string defined in this file if True,
                    #else from a separate ui file during development
@@ -46,12 +46,16 @@ class CustomToolbarEditor(QtGui.QWidget):
         if not LOAD_STRING:
             self.form = FreeCADGui.PySideUic.loadUi(uiPath + "/custom_toolbar.ui")
         else:
-            with tempfile.NamedTemporaryFile(suffix=".ui", delete=False) as temp_file:
-                temp_ui_file = temp_file.name
-                temp_file.write(UI_FILE.encode('utf-8'))
-                self.form = FreeCADGui.PySideUic.loadUi(temp_ui_file)
-                temp_file.close()
-                os.remove(temp_ui_file)
+            qba = QtCore.QByteArray(UI_FILE)
+            memFile = QtCore.QBuffer(qba)
+            memFile.open(QtCore.QIODevice.OpenModeFlag.ReadOnly)
+            self.form = FreeCADGui.PySideUic.loadUi(memFile)
+            # with tempfile.NamedTemporaryFile(suffix=".ui", delete=False) as temp_file:
+            #     temp_ui_file = temp_file.name
+            #     temp_file.write(UI_FILE.encode('utf-8'))
+            #     self.form = FreeCADGui.PySideUic.loadUi(temp_ui_file)
+            #     temp_file.close()
+            #     os.remove(temp_ui_file)
 
         self.form.setWindowTitle(f"Macro Toolbar Manager v.{__version__}")
         self.icon = self.QIconFromXPMString(__icon__)
@@ -314,20 +318,22 @@ class CustomToolbarEditor(QtGui.QWidget):
 
             def getColor(self):
                 """gets the current color of the color button, returns as (r,g,b,a) each a value from 0 to 255"""
-                palette = self.colorButton.palette()
-                color = palette.color(palette.Background)
-                #print(f"color = {color.red(), color.green(), color.blue()}")
-                return (color.red(), color.green(), color.blue(), 0) #0 not used, but 4 values are expected
+                # palette = self.colorButton.palette()
+                # color = palette.color(palette.Background)
+                # #print(f"color = {color.red(), color.green(), color.blue()}")
+                # return (color.red(), color.green(), color.blue(), 0) #0 not used, but 4 values are expected
+                return self.pointsColor
 
             def setColor(self, colorTuple):
-                self.pointsColor = colorTuple
+
                 if len(colorTuple) == 4:
                     r,g,b,a = colorTuple
                 else:
                     r,g,b = colorTuple
                     a = 0
-                color = QtGui.QColor(r,g,b,a)
-                colorString = f'rgb({color.red()}, {color.green()}, {color.blue()})'
+                self.pointsColor = (r, g, b, a)
+
+                colorString = f'rgb({r}, {g}, {b})'
                 self.colorButton.setStyleSheet(f'background-color: {colorString};')
 
             def onClearButtonClicked(self):
@@ -1472,15 +1478,15 @@ class CustomToolbarEditor(QtGui.QWidget):
                 width, height = base_image.width(), base_image.height()
                 format = base_image.format()
 
-                if format == 3:  # RGB format (3 bytes per pixel)
+                if format.value == 3:  # RGB format (3 bytes per pixel)
                     image_array = np.frombuffer(base_image.constBits(), dtype=np.uint8).reshape((height, width, 3))
-                elif format == 4 or format == QtGui.QImage.Format.Format_ARGB32_Premultiplied:  # RGBA format (4 bytes per pixel)
+                elif format.value == 4 or format.value == QtGui.QImage.Format.Format_ARGB32_Premultiplied:  # RGBA format (4 bytes per pixel)
                     image_array = np.frombuffer(base_image.constBits(), dtype=np.uint8).reshape((height, width, 4))
 
                 if image_array is not None:
-                    if format == 4 or format == QtGui.QImage.Format.Format_ARGB32_Premultiplied:  # ARGB or ARGB_Premultiplied to BGR
+                    if format.value == 4 or format == QtGui.QImage.Format.Format_ARGB32_Premultiplied:  # ARGB or ARGB_Premultiplied to BGR
                         temp_image = cv2.cvtColor(image_array, cv2.COLOR_RGBA2BGR)
-                    elif format == 3:  # RGB to BGR
+                    elif format.value == 3:  # RGB to BGR
                         temp_image = cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
                     temp_image = cv2.resize(temp_image, (64,64)) #to fit label
                 for pt in pts:
@@ -1569,31 +1575,57 @@ class CustomToolbarEditor(QtGui.QWidget):
                     self.childDlg.basePixmap = self.pixmap
                     self.childDlg.updateImage()
 
+            # def setColor(self, colorTuple):
+            #     r,g,b,a = colorTuple
+            #     color = QtGui.QColor(r,g,b,a)
+            #     self.color = color
+            #     colorString = f'rgb({color.red()}, {color.green()}, {color.blue()})'
+            #     self.colorButton.setStyleSheet(f'background-color: {colorString};')
+
             def setColor(self, colorTuple):
-                r,g,b,a = colorTuple
-                color = QtGui.QColor(r,g,b,a)
-                colorString = f'rgb({color.red()}, {color.green()}, {color.blue()})'
-                self.colorButton.setStyleSheet(f'background-color: {colorString};')
+
+                r, g, b = colorTuple
+                self.color = (r, g, b)
+
+                colorString = f'rgb({r}, {g}, {b})'
+                self.colorButton.setStyleSheet(
+                    f'background-color: {colorString};'
+                )
+
+            # def setBorderColor(self, colorTuple):
+            #     r,g,b,a = colorTuple
+            #     color = QtGui.QColor(r,g,b,a)
+            #     self.borderColor = color
+            #     colorString = f'rgb({color.red()}, {color.green()}, {color.blue()})'
+            #     self.borderColorButton.setStyleSheet(f'background-color: {colorString};')
 
             def setBorderColor(self, colorTuple):
-                r,g,b,a = colorTuple
-                color = QtGui.QColor(r,g,b,a)
-                colorString = f'rgb({color.red()}, {color.green()}, {color.blue()})'
-                self.borderColorButton.setStyleSheet(f'background-color: {colorString};')
+
+                r, g, b = colorTuple
+                self.borderColor = (r, g, b)
+
+                colorString = f'rgb({r}, {g}, {b})'
+                self.borderColorButton.setStyleSheet(
+                    f'background-color: {colorString};'
+                )
 
             def getColor(self):
                 """gets the current color of the color button, returns as (r,g,b,a) each a value from 0 to 255"""
                 palette = self.colorButton.palette()
-                color = palette.color(palette.Background)
+                #color = palette.color(palette.Background)
+                color = palette.color(QtGui.QPalette.ColorRole.Button)
                 #print(f"color = {color.red(), color.green(), color.blue()}")
                 return (color.red(), color.green(), color.blue(), 0) #0 not used, but 4 values are expected
+
 
             def getBorderColor(self):
                 """gets the current color of the border color button, returns as (r,g,b,a) each from 0 to 255"""
                 palette = self.borderColorButton.palette()
-                color = palette.color(palette.Background)
+                #color = palette.color(palette.Background)
+                color = palette.color(QtGui.QPalette.ColorRole.Button)
                 #print(f"color = {color.red(), color.green(), color.blue()}")
                 return (color.red(), color.green(), color.blue(), 0) #0 not used, but 4 values are expected
+
 
             def onAddLayerButtonClicked(self):
                 """Opens a new tab with the current image as a base for the new image"""
@@ -1899,7 +1931,7 @@ class CustomToolbarEditor(QtGui.QWidget):
                         self.statusBox.setText(f"Zoom: {self.zoomFactor} (default = 4)")
                     return super().eventFilter(obj, event)
                 if obj == self.iconLabel:
-                    if event.type() == event.MouseButtonPress:
+                    if event.type() == QtCore.QEvent.Type.MouseButtonPress:
                         if event.button() == QtCore.Qt.LeftButton:
                             self.dragging = True
                             self.start_pos = event.pos()
@@ -1940,14 +1972,14 @@ class CustomToolbarEditor(QtGui.QWidget):
                                     self.statusBox.setText(f"({posX},{posY}) not found in points list.")
                             self.iconLabel.setToolTip("") #gets annoying and in the way at times
                             return super().eventFilter(obj, event)
-                    elif event.type() == event.MouseMove:
+                    elif event.type() == QtCore.QEvent.Type.MouseMove:
 
                         if self.dragging and self.start_pos is not None:
                             delta = event.pos() - self.start_pos
                             self.xAdjustSpinBox.setValue(self.xAdjustSpinBox.value() + delta.x())
                             self.yAdjustSpinBox.setValue(self.yAdjustSpinBox.value() + delta.y())
                             self.start_pos = event.pos()
-                    elif event.type() == event.MouseButtonRelease:
+                    elif event.type() == QtCore.QEvent.Type.MouseButtonRelease:
                         if event.button() == QtCore.Qt.LeftButton:
                             self.dragging = False
                             self.start_pos = None
@@ -4328,6 +4360,7 @@ class ToolbarManager:
                 test_name = toolbarName + f" ({i})"
                 if not self.getOtherGroup(test_name):
                     toolbarName = test_name
+                    break
                 i = i + 1
 
         # Second, the toolbar preference group name
