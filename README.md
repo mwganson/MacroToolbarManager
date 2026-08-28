@@ -154,6 +154,7 @@ There is a label at the bottom of the dialog below the Icon information field bu
 
 
 ## Changelog
+### v2026.08.28 -- pyside6 related fixes, use QBuffer instead of tempfile to load ui string
 ### v2026.07.20b -- replace deprecated exec_() with exec()
 ### v2026.07.20 -- update the shortcut line edit to work with newer FreeCAD builds, other minor PySide6 update
 ### v2023.10.27 -- update the ui to use a gridlayout instead of all the different horizontal and vertical layouts, Make icon button always active
